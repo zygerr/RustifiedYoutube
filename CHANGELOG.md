@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+- Stretch the seek rail across the compact player and scale the expanded rail to the media panel.
+- Keep a clicked or dragged seek position visible until the media engine confirms that specific request; ignore stale clock updates.
+- Add persistent Shuffle for upcoming tracks, preserve the current song and played queue, and restore the remaining order when disabled.
+- Show a native Listen again row on Discover with account listening history and locally remembered plays, artwork, and one-click playback.
+- Remember a track only after playback starts successfully and add regression checks for seeking, responsive width, shuffle order, and history metadata.
+
 ## 0.3.0
 
 - Replace full-track fetching/remuxing with the persistent official YouTube Music streaming engine, hosted by WebView2 inside the Rust application.

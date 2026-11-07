@@ -11,7 +11,9 @@ An unofficial Windows x64 YouTube Music client. The interface, search, library, 
 - Render styled Unicode song titles, symbols, and emoji with fallback fonts installed by Windows. Windows font files are read locally and are not redistributed.
 - Search both songs and videos, filter All/Songs/Videos, and prioritize matching artists while keeping full titles.
 - Connect a Google account to access playlists, liked songs, and like/unlike actions.
-- Play, pause, seek, change volume, use previous/next, repeat the queue, and keep playing in the tray.
+- Find account listening history and locally remembered plays in **Discover → Listen again**. Click a card to play; Refresh reloads account history.
+- Seek on the full-width bottom rail or the rail below the expanded media panel. Click or drag to seek; focus the rail and use Left/Right to move five seconds.
+- Play, pause, change volume, use previous/next, repeat the queue, and keep playing in the tray. **Shuffle** randomizes upcoming tracks while preserving the current song and played entries; switching it off restores the remaining original order. The choice is saved across launches.
 
 The WebView is active during playback. It shows only the media surface in Video mode; the surrounding interface remains Rust. yt-dlp, Node.js, FFmpeg, complete-track downloads, and the old temporary audio cache are no longer used or bundled. There is no offline library or automatic updater.
 
@@ -38,10 +40,13 @@ Scroll up/down over the volume slider or percentage. **Settings → Playback →
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+node --test native/tests/media_bridge.cjs
 ./scripts/build-native.ps1
 ```
 
 The per-user installer, portable ZIP, and SHA-256 checksums are written to `dist/<version>/`. Extract the whole portable ZIP before launching `RustifiedYoutube.exe`; its adjacent sign-in helper is required. Builds are currently unsigned. The packaging script downloads only a pinned, checksum-verified NSIS build tool.
+
+Node.js 24 is used only to run the media bridge regression tests during development and CI; it is not required or bundled for playback.
 
 Optional live checks (these contact YouTube):
 
@@ -50,7 +55,7 @@ cargo run -p rustified-core --example smoke -- --authenticated
 ./target/debug/RustifiedYoutube.exe --smoke-stream
 ```
 
-The streaming check opens a temporary app instance with volume zero, measures two real streams, verifies video dimensions, pause, seeking, and Audio/Video switching, then closes. It does not change saved UI preferences. Unit tests cover full title parsing, artist ranking, styled-title glyph coverage, volume wheel interaction, and media bridge restrictions.
+The streaming check opens a temporary app instance with volume zero, measures two real streams, verifies video dimensions, pause, seek confirmation, and Audio/Video switching, then closes. It does not change saved UI preferences. Unit tests cover full title and history parsing, artist ranking, styled-title glyph coverage, volume wheel interaction, seek interaction and width, shuffle order, and media bridge restrictions.
 
 ## Releases
 

@@ -14,13 +14,13 @@ pub enum PlayerCommand {
     Play { generation: u64, video_id: String },
     Toggle,
     Volume(f64),
-    Seek(f64),
     Stop,
     Reload,
     Video(bool),
 }
 #[derive(Default, Clone, PartialEq)]
 pub struct PlayerState {
+    pub seek_ack: u64,
     pub title: String,
     pub transition: bool,
     pub generation: u64,
@@ -44,11 +44,15 @@ enum BridgeEvent {
         position: f64,
         target: Option<f64>,
         video: bool,
+        ready: u8,
+        seeking: bool,
+        api_state: i8,
     },
     Shortcut {
         action: Shortcut,
     },
     State {
+        seek_ack: u64,
         title: String,
         transition: bool,
         generation: u64,
@@ -80,6 +84,7 @@ enum TracePhase {
     ModeSettled,
     SeekQueued,
     SeekApplied,
+    SeekWaiting,
 }
 
 fn playback_origin(uri: &str) -> bool {
@@ -103,6 +108,7 @@ pub struct Player {
     quit_requested: Cell<bool>,
     current_video: RefCell<Option<String>>,
     last_playing: Cell<bool>,
+    seek_revision: Cell<u64>,
 }
 impl Player {
     pub fn start(cc: &eframe::CreationContext<'_>) -> Self {
@@ -124,6 +130,7 @@ impl Player {
             quit_requested: Cell::new(false),
             current_video: RefCell::new(None),
             last_playing: Cell::new(false),
+            seek_revision: Cell::new(0),
         };
         let build = (|| -> Result<_, Box<dyn std::error::Error>> {
             let mut context = WebContext::new(Some(rustified_core::session::profile_dir()?));
@@ -196,14 +203,18 @@ impl Player {
                     position,
                     target,
                     video,
+                    ready,
+                    seeking,
+                    api_state,
                 } => {
                     if std::env::args().any(|arg| arg == "--smoke-stream") {
                         println!(
-                            "Media trace: {phase:?}, position {position:.2}, seek {target:?}, video {video}"
+                            "Media trace: {phase:?}, position {position:.2}, seek {target:?}, video {video}, ready {ready}, seeking {seeking}, state {api_state}"
                         );
                     }
                 }
                 BridgeEvent::State {
+                    seek_ack,
                     title,
                     transition,
                     generation,
@@ -235,6 +246,7 @@ impl Player {
                     }
                     self.last_playing.set(playing);
                     let _ = self.updates.send(PlayerState {
+                        seek_ack,
                         title,
                         transition,
                         generation,
@@ -291,7 +303,6 @@ impl Player {
                 self.volume.set(value.clamp(0.0, 1.0));
                 json!({"op":"volume","value":self.volume.get()})
             }
-            PlayerCommand::Seek(value) => json!({"op":"seek","value":value.max(0.0)}),
             PlayerCommand::Video(video) => {
                 self.video.set(video);
                 json!({"op":"mode","video":video})
@@ -313,6 +324,17 @@ impl Player {
         } else {
             self.pending.borrow_mut().push(message);
         }
+    }
+    pub fn seek(&self, seconds: f64) -> u64 {
+        let revision = self.seek_revision.get() + 1;
+        self.seek_revision.set(revision);
+        let message = json!({"op":"seek","value":seconds.max(0.0),"revision":revision});
+        if self.ready.get() {
+            self.eval(&message);
+        } else {
+            self.pending.borrow_mut().push(message);
+        }
+        revision
     }
     pub fn place_video(&self, rect: Option<egui::Rect>, pixels_per_point: f32) {
         let bounds = rect

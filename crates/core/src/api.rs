@@ -182,6 +182,21 @@ impl Catalog {
         Ok(playlists)
     }
 
+    pub async fn history(&self) -> Result<Vec<Track>> {
+        let api = self
+            .signed
+            .as_ref()
+            .context("Connect your Google account to load listening history")?;
+        let json: serde_json::Value =
+            ytmapi_rs::json::from_json(api.json_query(ytmapi_rs::query::GetHistoryQuery).await?)?;
+        let mut tracks = Vec::new();
+        collect_history(&json, &mut tracks);
+        let mut seen = std::collections::HashSet::new();
+        tracks.retain(|track| seen.insert(track.id.clone()));
+        tracks.truncate(30);
+        Ok(tracks)
+    }
+
     pub async fn playlist(&self, id: &str) -> Result<Vec<Track>> {
         let browse_id = if id.starts_with("VL") {
             id.to_string()
@@ -268,6 +283,7 @@ fn collect_search(value: &serde_json::Value, video: bool, tracks: &mut Vec<Track
         let id = card
             .pointer("/playlistItemData/videoId")
             .or_else(|| card.pointer("/navigationEndpoint/watchEndpoint/videoId"))
+            .or_else(||card.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs/0/navigationEndpoint/watchEndpoint/videoId"))
             .and_then(|v| v.as_str());
         let Some(id) = id.filter(|id| valid_video_id(id)) else {
             return;
@@ -332,6 +348,40 @@ fn collect_search(value: &serde_json::Value, video: bool, tracks: &mut Vec<Track
         serde_json::Value::Array(items) => {
             for child in items {
                 collect_search(child, video, tracks);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_history(value: &serde_json::Value, tracks: &mut Vec<Track>) {
+    if let Some(card) = value.get("musicResponsiveListItemRenderer") {
+        let start = tracks.len();
+        collect_search(value, false, tracks);
+        if let Some(track) = tracks.get_mut(start) {
+            let duration =
+                runs_text(card.pointer(
+                    "/fixedColumns/0/musicResponsiveListItemFixedColumnRenderer/text/runs",
+                ));
+            if !duration.is_empty() {
+                track.duration = duration;
+            }
+            let kind=card.pointer("/navigationEndpoint/watchEndpoint/watchEndpointMusicSupportedConfigs/watchEndpointMusicConfig/musicVideoType")
+                .or_else(||card.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs/0/navigationEndpoint/watchEndpoint/watchEndpointMusicSupportedConfigs/watchEndpointMusicConfig/musicVideoType"))
+                .and_then(|value|value.as_str()).unwrap_or_default();
+            track.is_video = matches!(kind, "MUSIC_VIDEO_TYPE_OMV" | "MUSIC_VIDEO_TYPE_UGC");
+        }
+        return;
+    }
+    match value {
+        serde_json::Value::Object(fields) => {
+            for child in fields.values() {
+                collect_history(child, tracks);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                collect_history(child, tracks);
             }
         }
         _ => {}
@@ -444,6 +494,31 @@ fn config_string(html: &str, key: &str) -> Result<String> {
 #[cfg(test)]
 mod bootstrap_tests {
     use super::config_string;
+    #[test]
+    fn history_keeps_order_full_titles_and_fixed_duration() {
+        let row = |id, title: &str| {
+            serde_json::json!({"musicResponsiveListItemRenderer": {
+                "flexColumns":[
+                    {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[
+                        {"text":title,"navigationEndpoint":{"watchEndpoint":{"videoId":id,"watchEndpointMusicSupportedConfigs":{"watchEndpointMusicConfig":{"musicVideoType":"MUSIC_VIDEO_TYPE_OMV"}}}}},
+                        {"text":" 🚀"}
+                    ]}}},
+                    {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Nova Lane"},{"text":" • Album"}]}}}
+                ],
+                "fixedColumns":[{"musicResponsiveListItemFixedColumnRenderer":{"text":{"runs":[{"text":"5:00"}]}}}]
+            }})
+        };
+        let data = serde_json::json!({"contents":[row("Fixture0001", "𝗔𝗟𝗟 𝗧𝗛𝗘 𝗖𝗜𝗧𝗬"),row("Fixture0002", "Next song")]});
+        let mut tracks = Vec::new();
+        super::collect_history(&data, &mut tracks);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].id, "Fixture0001");
+        assert_eq!(tracks[1].id, "Fixture0002");
+        assert_eq!(tracks[0].title, "𝗔𝗟𝗟 𝗧𝗛𝗘 𝗖𝗜𝗧𝗬 🚀");
+        assert_eq!(tracks[0].artist, "Nova Lane");
+        assert_eq!(tracks[0].duration, "5:00");
+        assert!(tracks[0].is_video);
+    }
     #[test]
     fn search_preserves_highlighted_title_fragments_and_byline() {
         let data = serde_json::json!({"musicResponsiveListItemRenderer": {

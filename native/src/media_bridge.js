@@ -1,15 +1,17 @@
 (() => {
   if (location.origin !== 'https://music.youtube.com' || window.__rustifiedMedia) return;
-  const session = { generation: 0, target: '', playing: false, volume: .5, video: false, ready: false, counterpartUntil: 0, changed: 0, error: null, modeApplied: false, appliedMode: null, transition: null, diagnostic: false, lastPosition: 0, lastDuration: 0 };
+  const session = { generation: 0, target: '', playing: false, volume: .5, video: false, ready: false, counterpartUntil: 0, changed: 0, error: null, modeApplied: false, appliedMode: null, transition: null, diagnostic: false, lastPosition: 0, lastDuration: 0, seekRequest: null, seekAck: 0 };
   let last = '', boundVideo = null, ended = false, playAttempt = 0, lastAd = false;
   const send = data => window.ipc.postMessage(JSON.stringify(data));
   const api = () => document.querySelector('ytmusic-player')?.playerApi || document.querySelector('ytmusic-player-bar')?.playerApi || document.getElementById('movie_player');
   const video = () => api()?.getVideoElement?.() || api()?.querySelector?.('video') || document.querySelector('#movie_player video') || document.querySelector('ytmusic-player video') || document.querySelector('video');
   const position = () => Number(api()?.getCurrentTime?.() ?? video()?.currentTime ?? 0);
   const duration = () => Number(api()?.getDuration?.() ?? video()?.duration ?? 0);
-  const trace = (phase,target=null) => { if (session.diagnostic) send({type:'trace',phase,position:video()?.currentTime || 0,target,video:session.video}); };
-  const seek = seconds => {
-    session.lastPosition=seconds;
+  const trace = (phase,target=null) => { if (session.diagnostic) send({type:'trace',phase,position:video()?.currentTime || 0,target,video:session.video,ready:video()?.readyState || 0,seeking:!!video()?.seeking,api_state:api()?.getPlayerState?.() ?? -1}); };
+  const seek = (seconds,revision=0) => {
+    session.seekRequest={target:seconds,revision,requested:performance.now()};
+    // Reset rollover detection until an actual, settled clock is observed.
+    session.lastPosition=0;
     const player=api();
     const media=video();
     if (typeof player?.seekTo === 'function') player.seekTo(seconds,true);
@@ -26,7 +28,7 @@
     session.appliedMode = session.video;
     const button = document.querySelector(session.video ? 'ytmusic-av-toggle .video-button' : 'ytmusic-av-toggle .song-button');
     if (button && !button.disabled && button.getAttribute('aria-pressed') !== 'true' && !button.hasAttribute('selected')) {
-      session.transition = { source: video()?.currentSrc, started: performance.now(), loaded: false, seek: null };
+      session.transition = { source: video()?.currentSrc, started: performance.now(), loaded: false, seek: null, seekRevision: 0 };
       session.counterpartUntil = performance.now() + 10000;
       session.changed = performance.now();
       button.click();
@@ -71,6 +73,8 @@
           session.transition = null;
           session.lastPosition=0;
           session.lastDuration=0;
+          session.seekRequest=null;
+          session.seekAck=0;
           ended = false;
           document.dispatchEvent(new CustomEvent('yt-navigate', { detail: { endpoint: { watchEndpoint: { videoId: command.id, playlistId: 'RDAMVM' + command.id } } } }));
           break;
@@ -92,9 +96,9 @@
           break;
         case 'seek':
           if (Number.isFinite(command.value)) {
-            if (session.transition) { session.transition.seek = Math.max(0, command.value); trace('seek_queued',command.value); }
+            if (session.transition) { session.transition.seek = Math.max(0, command.value); session.transition.seekRevision=command.revision || 0; trace('seek_queued',command.value); }
             else {
-              seek(Math.max(0,command.value));
+              seek(Math.max(0,command.value),command.revision || 0);
             }
           }
           break;
@@ -133,10 +137,12 @@
     const ad = isAd();
     lastAd = ad;
     const nearEnd = session.lastDuration > 0 && session.lastPosition >= session.lastDuration - 1.5;
+    const seekReachedEnd = session.seekRequest && nearEnd && Math.abs(session.lastPosition-session.seekRequest.target) < 1.5;
     // The official player can advance its own queue before HTML 'ended' reaches
     // listeners. Keep the app's queue authoritative using the last media clock.
-    if (!ad && session.playing && !session.transition && nearEnd &&
-        ((id && id !== session.target) || (media && position() + 1 < session.lastPosition))) {
+    if (!ad && session.playing && !session.transition && (!session.seekRequest || seekReachedEnd) && nearEnd &&
+        ((id && id !== session.target) || (media && !media.seeking && position() + 1 < session.lastPosition &&
+          (!session.seekRequest || performance.now()-session.seekRequest.requested > 500)))) {
       ended=true;
       session.playing=false;
       media?.pause();
@@ -167,17 +173,24 @@
           trace('mode_settled',transition.seek);
           if (session.appliedMode !== session.video) {
             setMode();
-            if (session.transition) session.transition.seek = transition.seek;
-            else if (transition.seek !== null) seek(transition.seek);
+            if (session.transition) { session.transition.seek = transition.seek; session.transition.seekRevision=transition.seekRevision; }
+            else if (transition.seek !== null) seek(transition.seek,transition.seekRevision);
           } else if (transition.seek !== null) {
-            seek(transition.seek);
+            seek(transition.seek,transition.seekRevision);
           }
         }
       }
     }
+    if (session.seekRequest && matches && !ad && !session.transition && media && !media.seeking && media.readyState >= 2 &&
+        Math.abs(position()-session.seekRequest.target) < 1.5) {
+      session.seekAck=session.seekRequest.revision;
+      session.seekRequest=null;
+    }
+    if (session.seekRequest) trace('seek_waiting',position());
     const videoButton = document.querySelector('ytmusic-av-toggle .video-button');
     const state = {
       type: 'state', generation: session.generation, video_id: id,
+      seek_ack: session.seekAck,
       title: String(player?.getVideoData?.()?.title || '').slice(0,512),
       transition: !!session.transition,
       position: matches && Number.isFinite(position()) ? Math.round(position() * 100) / 100 : 0,
@@ -191,7 +204,11 @@
     const encoded = JSON.stringify(state);
     if (encoded !== last) { last = encoded; send(state); }
     ended = false;
-    if (!ad && matches && media && media.readyState >= 2 && Number.isFinite(duration()) && duration() > 0) {
+    // A seek into the final frame can hand off to YouTube's next item before
+    // 'seeked'. Remember the API's observed target clock so that handoff still
+    // advances the native queue, without treating an in-progress seek as EOF.
+    const observedSeek = session.seekRequest && Math.abs(position()-session.seekRequest.target) < 1.5;
+    if (!ad && matches && media && ((!media.seeking && media.readyState >= 2) || observedSeek) && Number.isFinite(duration()) && duration() > 0) {
       session.lastPosition=position();
       session.lastDuration=duration();
     }

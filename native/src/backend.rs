@@ -15,6 +15,7 @@ pub enum Request {
     Search(u64, String, SearchFilter),
     Playlist(u64, String),
     Library,
+    History,
     Connect,
     Disconnect,
     Like(String, bool),
@@ -25,6 +26,7 @@ pub enum Response {
     Ready(bool),
     Tracks(u64, Result<Vec<Track>, String>),
     Library(Result<Vec<Playlist>, String>),
+    History(Result<Vec<Track>, String>),
     Liked(String, bool, bool),
     Cover(String, egui::ColorImage),
     Notice(String),
@@ -98,6 +100,11 @@ impl Backend {
                                 let client = api.read().await.clone();
                                 let result = client.library().await.map_err(|_| "Your library couldn't load. Connect or reconnect your Google account.".into());
                                 send(&updates, &ctx, Response::Library(result));
+                            }
+                            Request::History => {
+                                let client=api.read().await.clone();
+                                let result=client.history().await.map_err(|_|"Couldn't refresh your listening history. Recent tracks from this app are still available.".into());
+                                send(&updates,&ctx,Response::History(result));
                             }
                             Request::Like(id, liked) => {
                                 let client = api.read().await.clone();

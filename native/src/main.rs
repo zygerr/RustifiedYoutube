@@ -4,6 +4,8 @@ mod backend;
 mod fonts;
 mod icons;
 mod player;
+mod queue;
+mod timeline;
 mod volume;
 
 pub static STREAM_CHECK_FAILED: std::sync::atomic::AtomicBool =

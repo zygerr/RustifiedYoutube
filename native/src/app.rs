@@ -34,6 +34,7 @@ struct Preferences {
     recent: Vec<Track>,
     close_to_tray: Option<bool>,
     volume_scroll_step: Option<u8>,
+    shuffle: Option<bool>,
 }
 
 struct StreamCheck {
@@ -61,6 +62,12 @@ pub struct MusicApp {
     tracks: Vec<Track>,
     playlists: Vec<Playlist>,
     queue: Vec<Track>,
+    queue_original: Vec<Track>,
+    account_recent: Vec<Track>,
+    session_recent: Vec<Track>,
+    history_loading: bool,
+    history_error: Option<String>,
+    recorded_generation: u64,
     current: Option<usize>,
     now: Option<Track>,
     loading: bool,
@@ -75,6 +82,7 @@ pub struct MusicApp {
     volume: f32,
     volume_wheel: crate::volume::Wheel,
     repeat: bool,
+    shuffle: bool,
     preferences: Preferences,
     textures: HashMap<String, egui::TextureHandle>,
     texture_order: VecDeque<String>,
@@ -83,8 +91,7 @@ pub struct MusicApp {
     tray_rx: mpsc::Receiver<TrayAction>,
     quit: bool,
     about: bool,
-    seeking: bool,
-    seek_position: f64,
+    timeline: crate::timeline::Timeline,
     expanded: bool,
     video_mode: bool,
     video_rect: Option<egui::Rect>,
@@ -118,6 +125,7 @@ impl MusicApp {
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
         let volume = preferences.volume.unwrap_or(0.5);
+        let shuffle = preferences.shuffle.unwrap_or(false);
         let (tray_tx, tray_rx) = mpsc::channel();
         let tray = Self::create_tray(ctx.clone(), tray_tx).ok();
         let player = Player::start(cc);
@@ -132,6 +140,12 @@ impl MusicApp {
             tracks: Vec::new(),
             playlists: Vec::new(),
             queue: Vec::new(),
+            queue_original: Vec::new(),
+            account_recent: Vec::new(),
+            session_recent: Vec::new(),
+            history_loading: false,
+            history_error: None,
+            recorded_generation: 0,
             current: None,
             now: None,
             loading: true,
@@ -146,6 +160,7 @@ impl MusicApp {
             volume,
             volume_wheel: crate::volume::Wheel::default(),
             repeat: false,
+            shuffle,
             preferences,
             textures: HashMap::new(),
             texture_order: VecDeque::new(),
@@ -154,8 +169,7 @@ impl MusicApp {
             tray_rx,
             quit: false,
             about: false,
-            seeking: false,
-            seek_position: 0.,
+            timeline: crate::timeline::Timeline::default(),
             expanded: false,
             video_mode: false,
             video_rect: None,
@@ -265,8 +279,7 @@ impl MusicApp {
         }
         self.resolving = false;
         self.preparation = "Starting YouTube stream…".into();
-        self.seeking = false;
-        self.seek_position = 0.;
+        self.timeline.reset();
         self.state = PlayerState::default();
         self.error = None;
         self.player.send(PlayerCommand::Stop);
@@ -275,9 +288,29 @@ impl MusicApp {
             generation: self.play_request,
             video_id: track.id.clone(),
         });
-        self.preferences.recent.retain(|item| item.id != track.id);
-        self.preferences.recent.insert(0, track);
-        self.preferences.recent.truncate(30);
+    }
+
+    fn start_queue(&mut self, tracks: Vec<Track>, index: usize) {
+        self.queue_original = tracks.clone();
+        self.queue = tracks;
+        if self.shuffle {
+            crate::queue::shuffle_remaining(&mut self.queue, Some(index), &mut rand::rng());
+        }
+        self.play_at(index);
+    }
+    fn toggle_shuffle(&mut self) {
+        self.shuffle = !self.shuffle;
+        self.preferences.shuffle = Some(self.shuffle);
+        if self.shuffle {
+            crate::queue::shuffle_remaining(&mut self.queue, self.current, &mut rand::rng());
+        } else {
+            crate::queue::restore_remaining(&mut self.queue, &self.queue_original, self.current);
+        }
+    }
+    fn seek_to(&mut self, seconds: f64) {
+        let target = seconds.clamp(0.0, self.state.duration.max(0.0));
+        let revision = self.player.seek(target);
+        self.timeline.request(target, revision, self.play_request);
     }
 
     fn next(&mut self) {
@@ -285,6 +318,20 @@ impl MusicApp {
             if index + 1 < self.queue.len() {
                 self.play_at(index + 1);
             } else if self.repeat && !self.queue.is_empty() {
+                if self.shuffle && self.queue.len() > 1 {
+                    crate::queue::shuffle_remaining(&mut self.queue, None, &mut rand::rng());
+                    if self
+                        .now
+                        .as_ref()
+                        .is_some_and(|now| now.id == self.queue[0].id)
+                        && let Some(other) = self
+                            .queue
+                            .iter()
+                            .position(|track| track.id != self.queue[0].id)
+                    {
+                        self.queue.swap(0, other);
+                    }
+                }
                 self.play_at(0);
             }
         }
@@ -292,7 +339,7 @@ impl MusicApp {
 
     fn previous(&mut self) {
         if self.state.position > 3. {
-            self.player.send(PlayerCommand::Seek(0.));
+            self.seek_to(0.);
         } else if let Some(index) = self.current {
             self.play_at(index.saturating_sub(1));
         }
@@ -315,6 +362,11 @@ impl MusicApp {
                     self.ready = true;
                     if connected {
                         self.backend.send(Request::Library);
+                        self.history_loading = true;
+                        self.backend.send(Request::History);
+                    } else {
+                        self.account_recent.clear();
+                        self.history_loading = false;
                     }
                     if self.tracks.is_empty() {
                         self.list_request += 1;
@@ -332,6 +384,16 @@ impl MusicApp {
                         Err(message) => self.error = Some(message),
                     }
                 }
+                Response::History(result) if self.connected => {
+                    self.history_loading = false;
+                    match result {
+                        Ok(tracks) => {
+                            self.account_recent = tracks;
+                            self.history_error = None;
+                        }
+                        Err(message) => self.history_error = Some(message),
+                    }
+                }
                 Response::Library(result) => match result {
                     Ok(playlists) => self.playlists = playlists,
                     Err(message) => self.error = Some(message),
@@ -342,6 +404,9 @@ impl MusicApp {
                             .tracks
                             .iter_mut()
                             .chain(self.queue.iter_mut())
+                            .chain(self.queue_original.iter_mut())
+                            .chain(self.account_recent.iter_mut())
+                            .chain(self.session_recent.iter_mut())
                             .chain(self.preferences.recent.iter_mut())
                         {
                             if track.id == id {
@@ -385,6 +450,22 @@ impl MusicApp {
                 continue;
             }
             let ended = state.ended;
+            self.timeline.observe(&state);
+            if state.playing
+                && !state.ad
+                && state.position > 0.5
+                && self.recorded_generation != self.play_request
+                && self.stream_check.is_none()
+            {
+                self.recorded_generation = self.play_request;
+                if let Some(track) = &self.now {
+                    for recent in [&mut self.preferences.recent, &mut self.session_recent] {
+                        recent.retain(|item| item.id != track.id);
+                        recent.insert(0, track.clone());
+                        recent.truncate(30);
+                    }
+                }
+            }
             if let Some(error) = &state.error {
                 self.error = Some(error.clone());
             }
@@ -392,6 +473,10 @@ impl MusicApp {
             if ended {
                 self.next();
             }
+        }
+        if self.timeline.expire() {
+            self.error =
+                Some("YouTube couldn't confirm the seek position. Try seeking again.".into());
         }
         while let Ok(action) = self.tray_rx.try_recv() {
             match action {
@@ -595,7 +680,7 @@ impl MusicApp {
 
     fn player_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("player")
-            .exact_height(110.)
+            .exact_height(if self.expanded { 100. } else { 136. })
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
@@ -642,11 +727,28 @@ impl MusicApp {
                         self.expanded = !self.expanded;
                     }
                     ui.allocate_ui_with_layout(
-                        Vec2::new((ui.available_width() - 240.).max(260.), 78.),
+                        Vec2::new((ui.available_width() - 240.).max(244.), 72.),
                         Layout::top_down(Align::Center),
                         |ui| {
                             ui.horizontal(|ui| {
-                                ui.add_space(((ui.available_width() - 170.) / 2.).max(0.));
+                                ui.add_space(((ui.available_width() - 214.) / 2.).max(0.));
+                                let shuffle = icons::button(
+                                    ui,
+                                    Icon::Shuffle,
+                                    "Shuffle upcoming tracks",
+                                    30.,
+                                    false,
+                                );
+                                if shuffle.clicked() {
+                                    self.toggle_shuffle();
+                                }
+                                if self.shuffle {
+                                    ui.painter().circle_filled(
+                                        shuffle.rect.center_bottom() + Vec2::new(0., 2.),
+                                        2.,
+                                        ACCENT,
+                                    );
+                                }
                                 if icons::button(ui, Icon::Previous, "Previous track", 36., false)
                                     .clicked()
                                 {
@@ -670,8 +772,7 @@ impl MusicApp {
                                     if self.now.is_some() {
                                         self.player.send(PlayerCommand::Toggle);
                                     } else if !self.tracks.is_empty() {
-                                        self.queue = self.tracks.clone();
-                                        self.play_at(0);
+                                        self.start_queue(self.tracks.clone(), 0);
                                     }
                                 }
                                 if icons::button(ui, Icon::Next, "Next track", 36., false).clicked()
@@ -690,43 +791,6 @@ impl MusicApp {
                                         ACCENT,
                                     );
                                 }
-                            });
-                            ui.horizontal(|ui| {
-                                if self.resolving {
-                                    ui.label(RichText::new(&self.preparation).small().color(MUTED));
-                                    return;
-                                }
-                                ui.label(
-                                    RichText::new(format_time(self.state.position))
-                                        .size(10.)
-                                        .color(MUTED),
-                                );
-                                if !self.seeking {
-                                    self.seek_position = self.state.position;
-                                }
-                                let response = ui.add_sized(
-                                    [(ui.available_width() - 48.).max(80.), 18.],
-                                    egui::Slider::new(
-                                        &mut self.seek_position,
-                                        0.0..=self.state.duration.max(1.),
-                                    )
-                                    .clamping(egui::SliderClamping::Never)
-                                    .show_value(false),
-                                );
-                                if response.drag_started() {
-                                    self.seeking = true;
-                                }
-                                if response.drag_stopped()
-                                    || (response.changed() && !response.dragged())
-                                {
-                                    self.seeking = false;
-                                    self.player.send(PlayerCommand::Seek(self.seek_position));
-                                }
-                                ui.label(
-                                    RichText::new(format_time(self.state.duration))
-                                        .size(10.)
-                                        .color(MUTED),
-                                );
                             });
                         },
                     );
@@ -753,7 +817,147 @@ impl MusicApp {
                         );
                     });
                 });
+                if !self.expanded {
+                    self.timeline_ui(ui, "compact_timeline");
+                }
             });
+    }
+
+    fn timeline_ui(&mut self, ui: &mut egui::Ui, id: &str) {
+        ui.horizontal(|ui| {
+            let clock_width = 48.;
+            ui.add_sized(
+                [clock_width, 24.],
+                egui::Label::new(
+                    RichText::new(format_time(self.timeline.position(self.state.position)))
+                        .size(11.)
+                        .color(MUTED),
+                ),
+            );
+            let width = (ui.available_width() - clock_width - ui.spacing().item_spacing.x).max(1.);
+            let seek = ui
+                .allocate_ui_with_layout(
+                    Vec2::new(width, 24.),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        self.timeline
+                            .show(
+                                ui,
+                                id,
+                                self.state.duration,
+                                self.state.position,
+                                self.now.is_some() && !self.state.ad,
+                            )
+                            .1
+                    },
+                )
+                .inner;
+            ui.add_sized(
+                [clock_width, 24.],
+                egui::Label::new(
+                    RichText::new(format_time(self.state.duration))
+                        .size(11.)
+                        .color(MUTED),
+                ),
+            );
+            if let Some(target) = seek {
+                self.seek_to(target);
+                ui.ctx().request_repaint();
+            }
+        });
+    }
+
+    fn recent_tracks(&self) -> Vec<Track> {
+        let mut seen = HashSet::new();
+        self.session_recent
+            .iter()
+            .chain(&self.account_recent)
+            .chain(&self.preferences.recent)
+            .filter(|track| seen.insert(track.id.clone()))
+            .take(30)
+            .cloned()
+            .collect()
+    }
+
+    fn recent_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Listen again");
+            if self.history_loading {
+                ui.spinner();
+            }
+            if self.connected
+                && ui
+                    .add_enabled(!self.history_loading, egui::Button::new("Refresh").small())
+                    .clicked()
+            {
+                self.history_loading = true;
+                self.backend.send(Request::History);
+            }
+        });
+        if let Some(message) = &self.history_error {
+            ui.label(RichText::new(message).small().color(MUTED));
+        }
+        let recent = self.recent_tracks();
+        if recent.is_empty() {
+            ui.label(
+                RichText::new(if self.history_loading {
+                    "Loading your listening history…"
+                } else {
+                    "Songs you listen to will appear here."
+                })
+                .color(MUTED),
+            );
+        } else {
+            egui::ScrollArea::horizontal()
+                .id_salt("recent_tracks")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        for (index, track) in recent.iter().enumerate() {
+                            let card = ui
+                                .push_id((&track.id, index), |ui| {
+                                    egui::Frame::new()
+                                        .fill(PANEL)
+                                        .corner_radius(10)
+                                        .inner_margin(10)
+                                        .show(ui, |ui| {
+                                            ui.set_width(120.);
+                                            self.cover(ui, &track.cover, 120.);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&track.title).strong(),
+                                                )
+                                                .truncate(),
+                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&track.artist)
+                                                        .small()
+                                                        .color(MUTED),
+                                                )
+                                                .truncate(),
+                                            );
+                                        })
+                                        .response
+                                        .interact(Sense::click())
+                                        .on_hover_text(format!("{}\n{}", track.title, track.artist))
+                                })
+                                .inner;
+                            card.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    format!("Play {}", track.title),
+                                )
+                            });
+                            if card.clicked() {
+                                self.start_queue(recent.clone(), index);
+                            }
+                        }
+                    });
+                });
+        }
+        ui.add_space(20.);
     }
 
     fn tracks_ui(&mut self, ui: &mut egui::Ui, from_queue: bool) {
@@ -778,10 +982,11 @@ impl MusicApp {
             ui.label(RichText::new(format!("{count} songs")).small().color(MUTED));
             ui.add_space(10.);
             if ui.button("Play all").clicked() {
-                if !from_queue {
-                    self.queue = self.tracks.clone();
+                if from_queue {
+                    self.play_at(0);
+                } else {
+                    self.start_queue(self.tracks.clone(), 0);
                 }
-                self.play_at(0);
             }
         });
         ui.add_space(12.);
@@ -816,10 +1021,11 @@ impl MusicApp {
                                 )
                                 .clicked()
                                 {
-                                    if !from_queue {
-                                        self.queue = self.tracks.clone();
+                                    if from_queue {
+                                        self.play_at(index);
+                                    } else {
+                                        self.start_queue(self.tracks.clone(), index);
                                     }
-                                    self.play_at(index);
                                 }
                                 self.cover(ui, &track.cover, 46.);
                                 let title_width = (ui.available_width() - 220.).max(150.);
@@ -855,6 +1061,7 @@ impl MusicApp {
                                         .clicked()
                                     {
                                         self.queue.push(track.clone());
+                                        self.queue_original.push(track.clone());
                                     }
                                     let heart = icons::button(
                                         ui,
@@ -1007,6 +1214,7 @@ impl MusicApp {
                         ..Default::default()
                     },
                 ];
+                self.queue_original = self.queue.clone();
                 self.expanded = true;
                 self.video_mode = true;
                 self.player.send(PlayerCommand::Video(true));
@@ -1029,11 +1237,15 @@ impl MusicApp {
                     self.state.video_width,
                     self.state.video_height
                 );
-                self.player.send(PlayerCommand::Seek(30.));
+                self.seek_to(30.);
+                assert_eq!(self.timeline.position(self.state.position), 30.);
                 self.player.send(PlayerCommand::Toggle);
                 check.stage = 2;
             }
-            2 if !self.state.playing && self.state.position >= 29. => {
+            2 if !self.state.playing
+                && self.state.position >= 29.
+                && self.timeline.pending_confirmed() =>
+            {
                 println!("Pause and seek verified");
                 self.player.send(PlayerCommand::Toggle);
                 check.stage = 3;
@@ -1059,8 +1271,7 @@ impl MusicApp {
                 self.video_mode = true;
                 self.player.send(PlayerCommand::Video(true));
                 check.selected = Some(std::time::Instant::now());
-                self.player
-                    .send(PlayerCommand::Seek(self.state.duration - 1.));
+                self.seek_to(self.state.duration - 1.);
                 check.stage = 5;
             }
             5 if self.state.playing
@@ -1127,7 +1338,7 @@ impl MusicApp {
                 Vec2::new(left_width, height),
                 Layout::top_down(Align::Center),
                 |ui| {
-                    let media_height = (left_width * 9.0 / 16.0).min((height - 130.0).max(160.0));
+                    let media_height = (left_width * 9.0 / 16.0).min((height - 172.0).max(120.0));
                     if self.video_mode {
                         let (rect, _) = ui.allocate_exact_size(
                             Vec2::new(left_width, media_height),
@@ -1144,7 +1355,8 @@ impl MusicApp {
                             },
                         );
                     }
-                    ui.add_space(20.);
+                    self.timeline_ui(ui, "expanded_timeline");
+                    ui.add_space(12.);
                     ui.add(egui::Label::new(RichText::new(&track.title).size(22.).strong()).wrap());
                     ui.label(RichText::new(&track.artist).size(16.).color(MUTED));
                     if self.state.buffering {
@@ -1401,6 +1613,7 @@ impl eframe::App for MusicApp {
                 }
                 match self.page.clone() {
                     Page::Discover => {
+                        self.recent_ui(ui);
                         ui.label(
                             RichText::new(
                                 "A little focus, a little energy, or something unexpected.",

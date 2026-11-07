@@ -14,6 +14,7 @@ pub enum Icon {
     Settings,
     Plus,
     Repeat,
+    Shuffle,
 }
 
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color32) {
@@ -107,6 +108,22 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color3
             line(point(7., 4.), point(-7., 4.));
             line(point(-7., 4.), point(-3., 8.));
         }
+        Icon::Shuffle => {
+            for direction in [-1.0, 1.0] {
+                ui_line(
+                    painter,
+                    &[
+                        point(-8., -5. * direction),
+                        point(-3., -5. * direction),
+                        point(3., 5. * direction),
+                        point(8., 5. * direction),
+                    ],
+                    stroke,
+                );
+                line(point(8., 5. * direction), point(4., 1. * direction));
+                line(point(8., 5. * direction), point(4., 9. * direction));
+            }
+        }
         Icon::Settings => {
             painter.circle_stroke(center, 7., stroke);
             painter.circle_stroke(center, 2., stroke);
@@ -117,6 +134,10 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color3
             }
         }
     }
+}
+
+fn ui_line(painter: &egui::Painter, points: &[Pos2], stroke: Stroke) {
+    painter.add(egui::Shape::line(points.to_vec(), stroke));
 }
 
 pub fn button(

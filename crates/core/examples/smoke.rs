@@ -11,6 +11,11 @@ async fn main() -> anyhow::Result<()> {
     let api = Catalog::new(cookie.as_deref()).await?;
     if authenticated {
         anyhow::ensure!(api.signed_in(), "No native account session");
+        let recent = api.history().await?;
+        println!(
+            "Authenticated listening history: {} tracks (names withheld)",
+            recent.len()
+        );
         let playlists = api.library().await?;
         println!(
             "Authenticated library: {} playlists (names withheld)",
