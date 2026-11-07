@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+- Repair fragmented M4A containers before Windows playback, fixing tracks that immediately jumped to EOF and skipped.
+- Reject premature end events, isolate events per track, and ignore stale player updates when changing songs.
+- Show which audio preparation stage is running and report playback startup failures instead of waiting indefinitely.
+- Search both songs and music videos, offer All/Songs/Videos filters, and prioritize matching artists.
+- Preserve complete title and artist text, including highlighted fragments, and deduplicate results by video ID.
+- Bundle the pinned FFmpeg helper used to repair audio containers without re-encoding.
+
 ## 0.2.0
 
 - Replace the website wrapper with a native Rust interface using egui, wgpu, and DirectX 12.

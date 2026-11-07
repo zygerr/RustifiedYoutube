@@ -4,13 +4,13 @@ An unofficial YouTube Music desktop client for Windows x64. Version 0.2 uses a n
 
 ## Features
 
-- Search songs directly through the YouTube Music metadata API.
+- Search songs and videos, filter All/Songs/Videos, and prioritize artist matches while keeping complete titles.
 - Connect your Google account to open playlists and liked songs, and like/unlike tracks.
 - Play, pause, seek, change volume, use previous/next, repeat the queue, and add songs to the queue.
 - Keep playing in the system tray, reopen the existing window, and save volume preferences.
 - Find the build version in the sidebar, Settings, About, and tray tooltip.
 
-The main window contains no HTML, JavaScript frontend, or WebView. A separate WebView2 helper opens temporarily for Google sign-in, then exits. Playback preparation uses bundled yt-dlp and Node.js helper processes; the application is not composed exclusively of Rust binaries. Google authentication and the unofficial YouTube API can change independently of the application.
+The main window contains no HTML, JavaScript frontend, or WebView. A separate WebView2 helper opens temporarily for Google sign-in, then exits. Playback preparation uses bundled yt-dlp, Node.js, and FFmpeg helper processes; the application is not composed exclusively of Rust binaries. FFmpeg remuxes fragmented M4A into a standard MP4 container for reliable Windows playback, without re-encoding. Google authentication and the unofficial YouTube API can change independently of the application.
 
 Tracks are prepared in temporary audio buffers before native playback starts, so selecting a track can take several seconds depending on YouTube and the network. Buffers are removed when their owner is released normally. A forced process termination can leave temporary files under the app's `audio-buffer` directory. There is no offline library or automatic updater.
 
@@ -21,7 +21,7 @@ Requires Windows 10/11 x64, a DirectX 12 compatible graphics driver, Rust stable
 ```powershell
 ./scripts/fetch-native-tools.ps1
 cargo build --workspace --locked
-Copy-Item target/native-tools/yt-dlp.exe,target/native-tools/node.exe target/debug/
+Copy-Item target/native-tools/yt-dlp.exe,target/native-tools/node.exe,target/native-tools/ffmpeg.exe target/debug/
 cargo run -p rustified-youtube-native --locked
 ```
 

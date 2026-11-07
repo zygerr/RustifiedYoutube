@@ -24,6 +24,22 @@ foreach ($taskLicense in @('LICENSE', 'THIRD_PARTY_LICENSES.txt')) {
     $taskLicensePath = Join-Path $taskTools "YT-DLP-$taskLicense.txt"
     if (!(Test-Path -LiteralPath $taskLicensePath)) { Invoke-WebRequest -Uri "https://raw.githubusercontent.com/yt-dlp/yt-dlp/2026.10.26/$taskLicense" -OutFile $taskLicensePath }
 }
+$taskFfmpegZip = Join-Path $taskTools 'ffmpeg-2026-11-06-win64.zip'
+Get-VerifiedTool 'https://github.com/yt-dlp/FFmpeg-Builds/releases/download/autobuild-2026-11-06-20-26/ffmpeg-N-128544-ga6c7695959-win64-gpl.zip' $taskFfmpegZip 'ec968f08c5f771fe230b8926295f18cf083779daaa32979c36e26110027d20a2'
+if (!(Test-Path -LiteralPath (Join-Path $taskTools 'ffmpeg.exe'))) {
+    $taskZip = [System.IO.Compression.ZipFile]::OpenRead($taskFfmpegZip)
+    try {
+        foreach ($taskEntry in $taskZip.Entries) {
+            if ($taskEntry.FullName.EndsWith('/bin/ffmpeg.exe')) {
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($taskEntry, (Join-Path $taskTools 'ffmpeg.exe'), $true)
+            }
+            if ($taskEntry.Name -match '^(COPYING|LICENSE)(\..*)?$') {
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($taskEntry, (Join-Path $taskTools "FFMPEG-$($taskEntry.Name).txt"), $true)
+            }
+        }
+    } finally { $taskZip.Dispose() }
+    if (!(Test-Path -LiteralPath (Join-Path $taskTools 'ffmpeg.exe'))) { throw 'FFmpeg executable missing from archive' }
+}
 $taskNsisZip = Join-Path $taskTools 'nsis-3.13.zip'
 Get-VerifiedTool 'https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip' $taskNsisZip 'ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8'
 if (!(Test-Path -LiteralPath (Join-Path $taskTools 'nsis\nsis-3.13\makensis.exe'))) { Expand-Archive -LiteralPath $taskNsisZip -DestinationPath (Join-Path $taskTools 'nsis') -Force }

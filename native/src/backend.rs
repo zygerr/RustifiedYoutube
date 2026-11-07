@@ -1,7 +1,7 @@
 use eframe::egui;
 use rustified_core::{
     api::Catalog,
-    model::{Playlist, Track},
+    model::{Playlist, SearchFilter, Track},
     resolver, session,
 };
 use std::{
@@ -12,7 +12,7 @@ use std::{
 use tokio::sync::{RwLock, Semaphore};
 
 pub enum Request {
-    Search(u64, String),
+    Search(u64, String, SearchFilter),
     Playlist(u64, String),
     Library,
     Resolve(u64, String),
@@ -27,6 +27,7 @@ pub enum Response {
     Tracks(u64, Result<Vec<Track>, String>),
     Library(Result<Vec<Playlist>, String>),
     Stream(u64, Result<resolver::PreparedAudio, String>),
+    Preparing(u64, String),
     Liked(String, bool, bool),
     Cover(String, egui::ColorImage),
     Notice(String),
@@ -84,15 +85,15 @@ impl Backend {
                     if matches!(request, Request::Resolve(..))
                         && let Some(job) = resolver_job.take() { job.abort(); }
                     let is_resolve = matches!(request, Request::Resolve(..));
-                    let search_id = match &request { Request::Search(id, _) | Request::Playlist(id, _) => Some(*id), _ => None };
+                    let search_id = match &request { Request::Search(id, _, _) | Request::Playlist(id, _) => Some(*id), _ => None };
                     if search_id.is_some() {
                         for (_, job) in search_jobs.drain() { job.abort(); }
                     }
                     let job = tokio::spawn(async move {
                         match request {
-                            Request::Search(id, query) => {
+                            Request::Search(id, query, filter) => {
                                 let client = api.read().await.clone();
-                                let result = client.search(&query).await.map_err(|_| "Search couldn't load. Check your connection and try again.".into());
+                                let result = client.search_filtered(&query, filter).await.map_err(|_| "Search couldn't load. Check your connection and try again.".into());
                                 send(&updates, &ctx, Response::Tracks(id, result));
                             }
                             Request::Playlist(id, playlist) => {
@@ -107,7 +108,9 @@ impl Backend {
                             }
                             Request::Resolve(id, video) => {
                                 let cookie = cookie.read().await.clone();
-                                let result = resolver::prepare(&video, cookie.as_deref()).await.map_err(|e| e.to_string());
+                                let result = resolver::prepare_with_status(&video, cookie.as_deref(), |message| {
+                                    send(&updates, &ctx, Response::Preparing(id, message.into()));
+                                }).await.map_err(|e| e.to_string());
                                 send(&updates, &ctx, Response::Stream(id, result));
                             }
                             Request::Like(id, liked) => {

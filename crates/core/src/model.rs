@@ -9,6 +9,16 @@ pub struct Track {
     pub duration: String,
     pub cover: String,
     pub liked: bool,
+    #[serde(default)]
+    pub is_video: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum SearchFilter {
+    #[default]
+    All,
+    Songs,
+    Videos,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

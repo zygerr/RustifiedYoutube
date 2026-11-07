@@ -4,7 +4,7 @@ use crate::{
     player::{Player, PlayerCommand, PlayerState},
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Sense, Vec2};
-use rustified_core::model::{Playlist, Track, format_time};
+use rustified_core::model::{Playlist, SearchFilter, Track, format_time};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -49,6 +49,7 @@ pub struct MusicApp {
     state: PlayerState,
     page: Page,
     query: String,
+    search_filter: SearchFilter,
     tracks: Vec<Track>,
     playlists: Vec<Playlist>,
     queue: Vec<Track>,
@@ -56,6 +57,7 @@ pub struct MusicApp {
     now: Option<Track>,
     loading: bool,
     resolving: bool,
+    preparation: String,
     connecting: bool,
     connected: bool,
     ready: bool,
@@ -112,6 +114,7 @@ impl MusicApp {
             state: PlayerState::default(),
             page: Page::Discover,
             query: String::new(),
+            search_filter: SearchFilter::All,
             tracks: Vec::new(),
             playlists: Vec::new(),
             queue: Vec::new(),
@@ -119,6 +122,7 @@ impl MusicApp {
             now: None,
             loading: true,
             resolving: false,
+            preparation: String::new(),
             connecting: false,
             connected: false,
             ready: false,
@@ -206,7 +210,11 @@ impl MusicApp {
         self.loading = true;
         self.error = None;
         self.page = Page::Tracks(format!("Results for “{}”", query.trim()));
-        self.backend.send(Request::Search(self.list_request, query));
+        self.backend.send(Request::Search(
+            self.list_request,
+            query,
+            self.search_filter,
+        ));
     }
 
     fn playlist(&mut self, id: String, title: String) {
@@ -225,6 +233,9 @@ impl MusicApp {
         self.now = Some(track.clone());
         self.play_request += 1;
         self.resolving = true;
+        self.preparation = "Preparing audio…".into();
+        self.seeking = false;
+        self.seek_position = 0.;
         self.state = PlayerState::default();
         self.error = None;
         self.player.send(PlayerCommand::Stop);
@@ -264,8 +275,11 @@ impl MusicApp {
                     }
                     if self.tracks.is_empty() {
                         self.list_request += 1;
-                        self.backend
-                            .send(Request::Search(self.list_request, "popular music".into()));
+                        self.backend.send(Request::Search(
+                            self.list_request,
+                            "popular music".into(),
+                            SearchFilter::All,
+                        ));
                     }
                 }
                 Response::Tracks(id, result) if id == self.list_request => {
@@ -282,9 +296,15 @@ impl MusicApp {
                 Response::Stream(id, result) if id == self.play_request => {
                     self.resolving = false;
                     match result {
-                        Ok(url) => self.player.send(PlayerCommand::Play(url)),
+                        Ok(audio) => self.player.send(PlayerCommand::Play {
+                            generation: id,
+                            audio,
+                        }),
                         Err(message) => self.error = Some(message),
                     }
+                }
+                Response::Preparing(id, message) if id == self.play_request => {
+                    self.preparation = message
                 }
                 Response::Liked(id, liked, success) => {
                     if success {
@@ -331,7 +351,7 @@ impl MusicApp {
             }
         }
         while let Ok(state) = self.player.rx.try_recv() {
-            if self.resolving {
+            if self.resolving || (state.generation != self.play_request && state.generation != 0) {
                 continue;
             }
             let ended = state.ended;
@@ -559,7 +579,8 @@ impl MusicApp {
                                     ui.add(
                                         egui::Label::new(RichText::new(&track.title).strong())
                                             .truncate(),
-                                    );
+                                    )
+                                    .on_hover_text(&track.title);
                                     ui.add(
                                         egui::Label::new(
                                             RichText::new(&track.artist).small().color(MUTED),
@@ -623,6 +644,10 @@ impl MusicApp {
                                 }
                             });
                             ui.horizontal(|ui| {
+                                if self.resolving {
+                                    ui.label(RichText::new(&self.preparation).small().color(MUTED));
+                                    return;
+                                }
                                 ui.label(
                                     RichText::new(format_time(self.state.position))
                                         .size(10.)
@@ -637,6 +662,7 @@ impl MusicApp {
                                         &mut self.seek_position,
                                         0.0..=self.state.duration.max(1.),
                                     )
+                                    .clamping(egui::SliderClamping::Never)
                                     .show_value(false),
                                 );
                                 if response.drag_started() {
@@ -761,10 +787,17 @@ impl MusicApp {
                                                     .strong(),
                                             )
                                             .truncate(),
-                                        );
+                                        )
+                                        .on_hover_text(&track.title);
                                         ui.add(
                                             egui::Label::new(
-                                                RichText::new(&track.artist).color(MUTED).size(12.),
+                                                RichText::new(format!(
+                                                    "{} · {}",
+                                                    if track.is_video { "Video" } else { "Song" },
+                                                    track.artist
+                                                ))
+                                                .color(MUTED)
+                                                .size(12.),
                                             )
                                             .truncate(),
                                         );
@@ -968,6 +1001,23 @@ impl eframe::App for MusicApp {
                             .clicked()
                     {
                         self.search(self.query.clone());
+                    }
+                });
+                ui.horizontal(|ui| {
+                    for (filter, label) in [
+                        (SearchFilter::All, "All"),
+                        (SearchFilter::Songs, "Songs"),
+                        (SearchFilter::Videos, "Videos"),
+                    ] {
+                        if ui
+                            .selectable_label(self.search_filter == filter, label)
+                            .clicked()
+                        {
+                            self.search_filter = filter;
+                            if !self.query.trim().is_empty() {
+                                self.search(self.query.clone());
+                            }
+                        }
                     }
                 });
                 ui.add_space(24.);

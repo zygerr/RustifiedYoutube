@@ -9,13 +9,22 @@ pub struct PreparedAudio {
 }
 
 pub async fn prepare(id: &str, cookie: Option<&str>) -> Result<PreparedAudio> {
+    prepare_with_status(id, cookie, |_| {}).await
+}
+
+pub async fn prepare_with_status(
+    id: &str,
+    cookie: Option<&str>,
+    status: impl Fn(&str),
+) -> Result<PreparedAudio> {
     anyhow::ensure!(valid_video_id(id), "Invalid YouTube video ID");
+    status("Fetching audio from YouTube…");
     let directory = session::app_dir()?.join("audio-buffer");
     std::fs::create_dir_all(&directory)?;
     let file = tempfile::Builder::new()
         .prefix("track-")
         .suffix(".m4a")
-        .tempfile_in(directory)?
+        .tempfile_in(&directory)?
         .into_temp_path();
     let mut command = Command::new(session::adjacent_tool("yt-dlp.exe"));
     command.args([
@@ -28,6 +37,8 @@ pub async fn prepare(id: &str, cookie: Option<&str>) -> Result<PreparedAudio> {
         "--no-part",
         "--no-mtime",
         "--force-overwrites",
+        "--fixup",
+        "never",
         "--socket-timeout",
         "20",
         "--max-filesize",
@@ -67,10 +78,46 @@ pub async fn prepare(id: &str, cookie: Option<&str>) -> Result<PreparedAudio> {
         output.status.success() && std::fs::metadata(&file)?.len() > 1024,
         "YouTube could not prepare this track. Try another song or reconnect your account."
     );
-    let url = reqwest::Url::from_file_path(&file)
+    // DASH M4A can jump directly to EOF in Windows Media Foundation. Flatten
+    // its fragments into an ordinary MP4 container without re-encoding audio.
+    status("Preparing audio for Windows…");
+    let fixed = tempfile::Builder::new()
+        .prefix("play-")
+        .suffix(".m4a")
+        .tempfile_in(directory)?
+        .into_temp_path();
+    let mut remux = Command::new(session::adjacent_tool("ffmpeg.exe"));
+    remux
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&file)
+        .args([
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(&fixed)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    remux.creation_flags(0x08000000);
+    let result = tokio::time::timeout(Duration::from_secs(30), remux.output())
+        .await
+        .context("Preparing native audio took too long")?
+        .context("The audio repair helper is missing. Reinstall RustifiedYoutube")?;
+    anyhow::ensure!(
+        result.status.success() && std::fs::metadata(&fixed)?.len() > 1024,
+        "This track's audio could not be prepared for Windows playback. Try another result."
+    );
+    let url = reqwest::Url::from_file_path(&fixed)
         .map_err(|_| anyhow::anyhow!("Invalid audio buffer path"))?
         .to_string();
-    Ok(PreparedAudio { url, _file: file })
+    Ok(PreparedAudio { url, _file: fixed })
 }
 
 fn netscape_cookie(cookie: &str) -> String {
@@ -87,67 +134,6 @@ fn netscape_cookie(cookie: &str) -> String {
         }
     }
     text
-}
-
-pub async fn resolve(id: &str, cookie: Option<&str>) -> Result<String> {
-    anyhow::ensure!(valid_video_id(id), "Invalid YouTube video ID");
-    let mut command = Command::new(session::adjacent_tool("yt-dlp.exe"));
-    command.args([
-        "--ignore-config",
-        "--no-playlist",
-        "--no-warnings",
-        "--socket-timeout",
-        "20",
-        "--get-url",
-        "--format",
-        "bestaudio[ext=m4a]/bestaudio",
-        "--no-plugin-dirs",
-        "--no-remote-components",
-        "--no-js-runtimes",
-    ]);
-    command.arg("--js-runtimes").arg(format!(
-        "node:{}",
-        session::adjacent_tool("node.exe").display()
-    ));
-    let cookie_file = if let Some(cookie) = cookie {
-        let mut file = tempfile::NamedTempFile::new_in(session::app_dir()?)?;
-        file.write_all(netscape_cookie(cookie).as_bytes())?;
-        command.arg("--cookies").arg(file.path());
-        Some(file)
-    } else {
-        None
-    };
-    command
-        .arg("--")
-        .arg(format!("https://music.youtube.com/watch?v={id}"));
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
-    let output = tokio::time::timeout(Duration::from_secs(65), command.output())
-        .await
-        .context("YouTube took too long to prepare this track")?
-        .context("The playback helper is missing. Reinstall RustifiedYoutube")?;
-    drop(cookie_file);
-    anyhow::ensure!(
-        output.status.success(),
-        "YouTube could not prepare this track. Try another song or reconnect your account."
-    );
-    let text = String::from_utf8(output.stdout)?;
-    let value = text
-        .lines()
-        .find(|line| line.starts_with("https://"))
-        .context("No playable stream was returned")?;
-    let url = reqwest::Url::parse(value)?;
-    anyhow::ensure!(
-        url.host_str()
-            .is_some_and(|h| h.ends_with(".googlevideo.com")),
-        "Unexpected stream host"
-    );
-    Ok(value.into())
 }
 
 #[cfg(test)]

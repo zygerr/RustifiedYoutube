@@ -1,11 +1,11 @@
-use crate::model::{Playlist, Track};
+use crate::model::{Playlist, SearchFilter, Track, valid_video_id};
 use anyhow::{Context, Result};
 use futures::{StreamExt, TryStreamExt};
 use ytmapi_rs::{
     YtMusic,
     auth::{BrowserToken, noauth::NoAuthToken},
     common::{LikeStatus, PlaylistID, Thumbnail, VideoID, YoutubeID},
-    parse::{PlaylistItem, SearchResultSong},
+    parse::PlaylistItem,
     query::GetPlaylistTracksQuery,
 };
 
@@ -20,18 +20,6 @@ fn cover(images: &[Thumbnail]) -> String {
         .min_by_key(|x| x.width.abs_diff(256))
         .map(|x| x.url.clone())
         .unwrap_or_default()
-}
-
-fn search_track(s: SearchResultSong) -> Track {
-    Track {
-        id: s.video_id.get_raw().into(),
-        title: s.title,
-        artist: s.artist,
-        album: s.album.map(|a| a.name).unwrap_or_default(),
-        duration: s.duration,
-        cover: cover(&s.thumbnails),
-        liked: false,
-    }
 }
 
 fn playlist_track(item: PlaylistItem) -> Option<Track> {
@@ -49,6 +37,7 @@ fn playlist_track(item: PlaylistItem) -> Option<Track> {
             duration: s.duration,
             cover: cover(&s.thumbnails),
             liked: s.like_status == LikeStatus::Liked,
+            is_video: false,
         }),
         PlaylistItem::Video(s) if s.is_available => Some(Track {
             id: s.video_id.get_raw().into(),
@@ -57,6 +46,7 @@ fn playlist_track(item: PlaylistItem) -> Option<Track> {
             duration: s.duration,
             cover: cover(&s.thumbnails),
             liked: s.like_status == LikeStatus::Liked,
+            is_video: true,
             ..Default::default()
         }),
         _ => None,
@@ -112,11 +102,58 @@ impl Catalog {
     }
 
     pub async fn search(&self, query: &str) -> Result<Vec<Track>> {
-        let songs = match &self.signed {
-            Some(api) => api.search_songs(query).await?,
-            None => self.guest.search_songs(query).await?,
+        self.search_filtered(query, SearchFilter::All).await
+    }
+
+    pub async fn search_filtered(&self, query: &str, filter: SearchFilter) -> Result<Vec<Track>> {
+        let mut tracks = match filter {
+            SearchFilter::Songs => self.search_page(query, false).await?,
+            SearchFilter::Videos => self.search_page(query, true).await?,
+            SearchFilter::All => {
+                let (songs, videos) = tokio::join!(
+                    self.search_page(query, false),
+                    self.search_page(query, true)
+                );
+                match (songs, videos) {
+                    (Ok(mut songs), Ok(videos)) => {
+                        songs.extend(videos);
+                        songs
+                    }
+                    (Ok(tracks), Err(_)) | (Err(_), Ok(tracks)) => tracks,
+                    (Err(error), Err(_)) => return Err(error),
+                }
+            }
         };
-        Ok(songs.into_iter().map(search_track).collect())
+        let mut seen = std::collections::HashSet::new();
+        tracks.retain(|track| seen.insert(track.id.clone()));
+        let query = normalized(query);
+        tracks.sort_by_cached_key(|track| std::cmp::Reverse(relevance(track, &query)));
+        Ok(tracks)
+    }
+
+    async fn search_page(&self, text: &str, video: bool) -> Result<Vec<Track>> {
+        use ytmapi_rs::query::search::{
+            FilteredSearch, SearchQuery, SongsFilter, SpellingMode, VideosFilter,
+        };
+        let json = if video {
+            let query = SearchQuery::<FilteredSearch<VideosFilter>>::from(text)
+                .with_spelling_mode(SpellingMode::WithSuggestions);
+            match &self.signed {
+                Some(api) => api.json_query(query).await?,
+                None => self.guest.json_query(query).await?,
+            }
+        } else {
+            let query = SearchQuery::<FilteredSearch<SongsFilter>>::from(text)
+                .with_spelling_mode(SpellingMode::WithSuggestions);
+            match &self.signed {
+                Some(api) => api.json_query(query).await?,
+                None => self.guest.json_query(query).await?,
+            }
+        };
+        let json: serde_json::Value = ytmapi_rs::json::from_json(json)?;
+        let mut tracks = Vec::new();
+        collect_search(&json, video, &mut tracks);
+        Ok(tracks)
     }
 
     pub async fn library(&self) -> Result<Vec<Playlist>> {
@@ -178,6 +215,126 @@ impl Catalog {
         )
         .await?;
         Ok(())
+    }
+}
+
+fn normalized(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'ă' | 'â' => 'a',
+            'î' => 'i',
+            'ș' | 'ş' => 's',
+            'ț' | 'ţ' => 't',
+            _ => c,
+        })
+        .collect()
+}
+
+fn relevance(track: &Track, query: &str) -> usize {
+    let artist = normalized(&track.artist);
+    let title = normalized(&track.title);
+    let tokens: Vec<_> = query.split_whitespace().collect();
+    let all_artist = !tokens.is_empty() && tokens.iter().all(|token| artist.contains(token));
+    tokens
+        .iter()
+        .filter(|token| title.contains(**token) || artist.contains(**token))
+        .count()
+        * 10
+        + usize::from(all_artist) * 5
+        + usize::from(artist == query) * 5
+}
+
+fn runs_text(value: Option<&serde_json::Value>) -> String {
+    value
+        .and_then(|v| v.as_array())
+        .map(|runs| {
+            runs.iter()
+                .filter_map(|r| r.get("text").and_then(|v| v.as_str()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn collect_search(value: &serde_json::Value, video: bool, tracks: &mut Vec<Track>) {
+    if let Some(card) = value.get("musicResponsiveListItemRenderer") {
+        if card
+            .get("musicItemRendererDisplayPolicy")
+            .and_then(|v| v.as_str())
+            == Some("MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT")
+        {
+            return;
+        }
+        let id = card
+            .pointer("/playlistItemData/videoId")
+            .or_else(|| card.pointer("/navigationEndpoint/watchEndpoint/videoId"))
+            .and_then(|v| v.as_str());
+        let Some(id) = id.filter(|id| valid_video_id(id)) else {
+            return;
+        };
+        let title = runs_text(
+            card.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs"),
+        );
+        if title.trim().is_empty() {
+            return;
+        }
+        let metadata = runs_text(
+            card.pointer("/flexColumns/1/musicResponsiveListItemFlexColumnRenderer/text/runs"),
+        );
+        let fields: Vec<_> = metadata.split(" • ").collect();
+        let artist_index =
+            usize::from(video && matches!(fields.first().copied(), Some("Video" | "Song")));
+        let artist = fields
+            .get(artist_index)
+            .copied()
+            .unwrap_or_default()
+            .to_string();
+        let duration = fields
+            .iter()
+            .rev()
+            .find(|field| {
+                let parts: Vec<_> = field.split(':').collect();
+                (2..=3).contains(&parts.len())
+                    && parts
+                        .iter()
+                        .all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()))
+            })
+            .copied()
+            .unwrap_or_default()
+            .to_string();
+        let album = if !video && fields.len() >= 3 {
+            fields[1].to_string()
+        } else {
+            String::new()
+        };
+        let images: Vec<Thumbnail> = card
+            .pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        tracks.push(Track {
+            id: id.into(),
+            title,
+            artist,
+            album,
+            duration,
+            cover: cover(&images),
+            liked: false,
+            is_video: video,
+        });
+        return;
+    }
+    match value {
+        serde_json::Value::Object(fields) => {
+            for child in fields.values() {
+                collect_search(child, video, tracks);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                collect_search(child, video, tracks);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -287,6 +444,40 @@ fn config_string(html: &str, key: &str) -> Result<String> {
 #[cfg(test)]
 mod bootstrap_tests {
     use super::config_string;
+    #[test]
+    fn search_preserves_highlighted_title_fragments_and_byline() {
+        let data = serde_json::json!({"musicResponsiveListItemRenderer": {
+            "playlistItemData":{"videoId":"Fixture0001"},
+            "flexColumns":[
+                {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"ECHO AVENUE - "},{"text":"NIGHT"},{"text":" SHIFT"}]}}},
+                {"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Nova "},{"text":"Lane"},{"text":" • "},{"text":"100K views"},{"text":" • "},{"text":"3:28"}]}}}
+            ]
+        }});
+        let mut tracks = Vec::new();
+        super::collect_search(&data, true, &mut tracks);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].title, "ECHO AVENUE - NIGHT SHIFT");
+        assert_eq!(tracks[0].artist, "Nova Lane");
+        assert_eq!(tracks[0].duration, "3:28");
+        assert!(tracks[0].is_video);
+    }
+    #[test]
+    fn artist_matches_rank_ahead_of_other_channels() {
+        let official = crate::model::Track {
+            title: "NIGHT SHIFT".into(),
+            artist: "Nova Lane".into(),
+            ..Default::default()
+        };
+        let other = crate::model::Track {
+            artist: "Another channel".into(),
+            ..official.clone()
+        };
+        assert!(
+            super::relevance(&official, "nova lane")
+                > super::relevance(&other, "nova lane")
+        );
+        assert_eq!(super::normalized("LUPTĂ ȘI ȚARĂ"), "lupta si tara");
+    }
     #[test]
     fn configuration_reads_one_json_value_without_truncating_escaped_strings() {
         assert_eq!(

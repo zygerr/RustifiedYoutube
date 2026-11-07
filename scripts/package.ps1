@@ -11,10 +11,11 @@ New-Item -ItemType Directory -Path $taskStage,$taskDist -Force | Out-Null
 foreach ($taskBinary in @('RustifiedYoutube.exe', 'rustified-auth.exe')) {
     Copy-Item -LiteralPath (Join-Path $taskRoot "target\release\$taskBinary") -Destination $taskStage
 }
-foreach ($taskTool in @('yt-dlp.exe', 'node.exe', 'NODE-LICENSE.txt', 'YT-DLP-LICENSE.txt')) {
+foreach ($taskTool in @('yt-dlp.exe', 'node.exe', 'ffmpeg.exe', 'NODE-LICENSE.txt', 'YT-DLP-LICENSE.txt')) {
     Copy-Item -LiteralPath (Join-Path $taskTools $taskTool) -Destination $taskStage
 }
 Copy-Item -LiteralPath (Join-Path $taskTools 'YT-DLP-THIRD_PARTY_LICENSES.txt.txt') -Destination (Join-Path $taskStage 'YT-DLP-THIRD-PARTY-LICENSES.txt')
+Copy-Item -LiteralPath (Join-Path $taskTools 'FFMPEG-LICENSE.txt.txt') -Destination (Join-Path $taskStage 'FFMPEG-LICENSE.txt')
 Copy-Item -LiteralPath (Join-Path $taskRoot 'README.md'),(Join-Path $taskRoot 'THIRD-PARTY-NOTICES.md') -Destination $taskStage
 $taskAllMetadata = & cargo metadata --locked --format-version 1 --manifest-path (Join-Path $taskRoot 'Cargo.toml') | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read dependency licenses' }

@@ -8,4 +8,6 @@ The official Node.js 24.18.0 runtime is bundled solely for the playback helper's
 
 WebView2 is a Microsoft system runtime used only by the temporary Google sign-in helper. The main interface and audio playback do not use it.
 
+The FFmpeg standalone executable is from the yt-dlp FFmpeg-Builds release `autobuild-2026-11-06-20-26`, built with GPL components. Its GPL license is included as `FFMPEG-LICENSE.txt`. Build configuration, source references, and patches are at https://github.com/yt-dlp/FFmpeg-Builds/tree/autobuild-2026-11-06-20-26; its FFmpeg source revision is `a6c7695959` at https://github.com/FFmpeg/FFmpeg/tree/a6c7695959. FFmpeg runs as a separate process solely to remux temporary audio containers without re-encoding.
+
 This project is independent and is not affiliated with Google, YouTube, Microsoft, or the authors of these components.
