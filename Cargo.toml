@@ -1,6 +1,13 @@
 [workspace]
-members = ["src-tauri"]
+members = ["native", "auth-helper", "crates/core"]
+default-members = ["native"]
 resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
 
 [profile.release]
 codegen-units = 1

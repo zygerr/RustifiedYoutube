@@ -1,7 +1,7 @@
 # Render the repository-owned geometric icon using Windows' drawing library.
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
-$taskIconDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'src-tauri\icons'
+$taskIconDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'assets'
 $taskImages = @()
 foreach ($taskSize in @(16, 32, 48, 256)) {
     $taskBitmap = [System.Drawing.Bitmap]::new($taskSize, $taskSize)

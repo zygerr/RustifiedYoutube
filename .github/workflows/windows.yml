@@ -20,39 +20,32 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: '. -> target'
-      - run: npm ci
-      - name: Validate versions
+      - name: Validate version
         shell: pwsh
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
-          $cargoVersion = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
-          if ($version -ne $tauriVersion -or $version -ne $cargoVersion) { throw 'Manifest versions disagree' }
+          $packages = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages
+          $version = ($packages | Where-Object name -eq 'rustified-youtube-native').version
+          if (!$version -or ($packages | Where-Object version -ne $version)) { throw 'Workspace versions disagree' }
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:RELEASE_TAG -ne "v$version") { throw 'Tag does not match the application version' }
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
-      - run: npm test
-      - run: npm run build
-      - name: Package installer, portable build, and checksums
+      - name: Build native client, helpers, and installer
         shell: pwsh
-        run: ./scripts/package.ps1
+        run: ./scripts/build-native.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: RustifiedYoutube-windows-x64
-          path: dist/*
+          path: dist/${{ env.APP_VERSION }}/*
           if-no-files-found: error
 
   release:

@@ -1,45 +1,35 @@
 # RustifiedYoutube
 
-An unofficial Windows desktop client for YouTube Music, built with Rust, Tauri 2, and Microsoft Edge WebView2.
+An unofficial YouTube Music desktop client for Windows x64. Version 0.2 uses a native Rust interface built with egui and wgpu (DirectX 12), with audio decoded by Windows MediaPlayer.
 
-## What it does
+## Features
 
-- Opens the YouTube Music website in a dedicated desktop window.
-- Keeps the WebView profile, cookies, and session data between launches.
-- Keeps playing when the window is closed to the system tray.
-- Provides native play/pause, previous, next, and mute controls.
-- Restores window size and position and brings the existing window forward when launched again.
-- Keeps sign-in redirects inside the WebView; opens unrelated HTTPS popup links in the default browser.
+- Search songs directly through the YouTube Music metadata API.
+- Connect your Google account to open playlists and liked songs, and like/unlike tracks.
+- Play, pause, seek, change volume, use previous/next, repeat the queue, and add songs to the queue.
+- Keep playing in the system tray, reopen the existing window, and save volume preferences.
+- Find the build version in the sidebar, Settings, About, and tray tooltip.
 
-The first version uses YouTube Music's web interface. It does not implement a separate streaming API, offline downloads, or automatic updates. Google sign-in and account-specific features need to be verified manually with your account; embedded-browser login is subject to Google's policies.
+The main window contains no HTML, JavaScript frontend, or WebView. A separate WebView2 helper opens temporarily for Google sign-in, then exits. Playback preparation uses bundled yt-dlp and Node.js helper processes; the application is not composed exclusively of Rust binaries. Google authentication and the unofficial YouTube API can change independently of the application.
+
+Tracks are prepared in temporary audio buffers before native playback starts, so selecting a track can take several seconds depending on YouTube and the network. Buffers are removed when their owner is released normally. A forced process termination can leave temporary files under the app's `audio-buffer` directory. There is no offline library or automatic updater.
 
 ## Running locally
 
-Requires Windows 10/11 x64, [Rust](https://rustup.rs/), [Microsoft C++ Build Tools](https://v2.tauri.app/start/prerequisites/#windows), Node.js 24 LTS, and WebView2 Runtime. Restart your terminal after installing Rust so `cargo` is on PATH.
+Requires Windows 10/11 x64, a DirectX 12 compatible graphics driver, Rust stable with the MSVC toolchain, and Microsoft C++ Build Tools. WebView2 Runtime is required only to connect or refresh a Google account.
 
 ```powershell
-npm ci
-npm run dev
+./scripts/fetch-native-tools.ps1
+cargo build --workspace --locked
+Copy-Item target/native-tools/yt-dlp.exe,target/native-tools/node.exe target/debug/
+cargo run -p rustified-youtube-native --locked
 ```
+
+Choose **Connect Google** to sign in. The helper reuses only this app's existing profile from earlier versions. Complete any Google challenges yourself. Search and playback are also available without signing in when YouTube permits the selected content.
 
 ## Controls
 
-Find the running version in **Help → About RustifiedYoutube**. The menu label and About dialog use the application's build version automatically.
-
-Shortcuts work while the application is focused. Track controls operate on the YouTube Music player after a track has been selected.
-
-| Action | Shortcut |
-| --- | --- |
-| Play / pause | Ctrl + Alt + Space |
-| Next / previous | Ctrl + Alt + Right / Left |
-| Mute / unmute | Ctrl + Alt + M |
-| Back / forward | Alt + Left / Right |
-| Home | Ctrl + H |
-| Reload | Ctrl + R |
-| Hide to tray | Ctrl + W, or close the window |
-| Quit completely | Ctrl + Q, or tray menu → Quit |
-
-Click the tray icon to reopen the window; right-click it for playback controls. Closing the window keeps the application running.
+Use the player bar or the tray menu. While the window is focused, `Ctrl+Alt+Space` toggles playback and `Ctrl+Q` exits. Closing the window keeps playback in the tray by default; change that behavior in Settings. Click the tray icon to show the window again. `Ctrl+R` has no browser reload action in the native client.
 
 ## Build and checks
 
@@ -47,23 +37,30 @@ Click the tray icon to reopen the window; right-click it for playback controls. 
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
-npm test
-npm run build
-./scripts/package.ps1
+./scripts/build-native.ps1
 ```
 
-The installer, portable ZIP, and SHA-256 checksums are collected in `dist/`. The installer sets up WebView2 if needed. The portable executable requires WebView2 to be installed already. Builds are currently unsigned.
+The per-user installer, portable ZIP, and SHA-256 checksums are written to `dist/<version>/`. Extract the whole portable ZIP before launching `RustifiedYoutube.exe`; its adjacent helper binaries are required. Builds are currently unsigned. Build scripts download pinned helper versions from their official releases and verify executable/archive SHA-256 checksums.
+
+Optional live checks (these contact YouTube):
+
+```powershell
+cargo run -p rustified-core --example smoke -- --authenticated
+./target/debug/RustifiedYoutube.exe --smoke-audio
+```
+
+The second check prepares a public track and confirms that native playback advances with volume set to zero. Unit tests do not require a Google account.
 
 ## Releases
 
-[GitHub Releases](https://github.com/zygerr/RustifiedYoutube/releases) hosts installers and release notes. While this repository is private, only people with repository access can download its releases.
+The [Windows workflow](https://github.com/zygerr/RustifiedYoutube/actions/workflows/windows.yml) checks and builds pushes to `main` and pull requests. Change the single workspace version in `Cargo.toml`, update `Cargo.lock`, and push a matching tag such as `v0.2.0` to create a **draft** [GitHub Release](https://github.com/zygerr/RustifiedYoutube/releases) with the installer, portable ZIP, and checksums. Private repository releases are accessible only to people who can access the repository.
 
-The Windows workflow checks and builds every push to `main` and every pull request. To prepare a release, update the version in `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and their lockfiles, then push a matching tag such as `v0.1.0`. A successful tagged build creates a **draft** GitHub Release containing the installer, portable ZIP, and checksums. Review it before publishing.
+## Local data
 
-## Data and permissions
+The dedicated Google sign-in profile is at `%LOCALAPPDATA%\io.github.zygerr.rustifiedyoutube\webview`. The native session is stored alongside it as `session.dpapi`, encrypted with Windows DPAPI for the current Windows user. Account cookies are sent only to YouTube for authenticated requests; a temporary cookie file is used by the playback helper and removed after preparation. Never share that directory or session files.
 
-The dedicated WebView2 profile is stored under `%LOCALAPPDATA%\io.github.zygerr.rustifiedyoutube\webview`. Window state is stored in the app's configuration directory. Uninstalling the executable does not necessarily remove the profile.
+**Disconnect native session** removes the native encrypted session. It does not log out the separate Google sign-in profile, so connecting again can restore the same account. To sign out of Google completely, use Google's sign-out flow in that profile. Uninstalling preserves user data.
 
-Remote pages receive no Tauri capabilities or custom native commands. Playback actions are initiated by the native menu and only run on the exact `https://music.youtube.com` origin. Credentials are entered on Google's own pages; the application does not copy another browser's cookies.
+The native process stores UI preferences in eframe's per-user application directory. See `THIRD-PARTY-NOTICES.md` for helper notices and source links.
 
 This project is independent and is not affiliated with Google or YouTube.

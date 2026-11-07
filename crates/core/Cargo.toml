@@ -1,0 +1,19 @@
+[package]
+name = "rustified-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+ytmapi-rs = { version = "0.3.3", default-features = false, features = ["native-tls", "simplified-queries", "reqwest"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "process", "time", "macros"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json"] }
+futures = "0.3"
+chrono = { version = "0.4", features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+directories = "6"
+tempfile = "3"
+windows = { version = "0.62", features = ["Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Foundation"] }
