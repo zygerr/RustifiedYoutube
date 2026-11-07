@@ -42,6 +42,7 @@ struct StreamCheck {
     stage: u8,
     last_trace: u64,
     session_refreshed: bool,
+    saw_ad: bool,
 }
 struct AccountCheck {
     started: std::time::Instant,
@@ -204,6 +205,7 @@ impl MusicApp {
                     stage: 0,
                     last_trace: 0,
                     session_refreshed: false,
+                    saw_ad: false,
                 }),
             snapshot: crate::preview::Snapshot::new(),
             account_check: crate::account::smoke_active().then(|| AccountCheck {
@@ -432,6 +434,14 @@ impl MusicApp {
             match response {
                 Response::Ready(connected) => {
                     self.connected = connected;
+                    self.player.require_account(
+                        connected
+                            || (rustified_core::session::native_enabled()
+                                && rustified_core::session::load_session()
+                                    .ok()
+                                    .flatten()
+                                    .is_some()),
+                    );
                     self.ready = true;
                     if connected {
                         self.library_loaded = false;
@@ -449,7 +459,12 @@ impl MusicApp {
                 }
                 Response::CaptureSession(id) => self.player.capture_session(id),
                 Response::AccountStatus(status) => self.account_status = status,
-                Response::ConnectFinished => self.connecting = false,
+                Response::ConnectFinished { browser_login } => {
+                    self.connecting = false;
+                    if browser_login {
+                        self.player.reconnect();
+                    }
+                }
                 Response::Tracks(id, result) if id == self.list_request => {
                     self.loading = false;
                     match result {
@@ -550,6 +565,9 @@ impl MusicApp {
             if self.resolving || (state.generation != self.play_request && state.generation != 0) {
                 continue;
             }
+            if let Some(check) = &mut self.stream_check {
+                check.saw_ad |= state.ad;
+            }
             let ended = state.ended;
             self.timeline.observe(&state);
             if state.playing
@@ -578,6 +596,10 @@ impl MusicApp {
         if self.timeline.expire() {
             self.error =
                 Some("YouTube couldn't confirm the seek position. Try seeking again.".into());
+        }
+        if self.player.needs_login() {
+            self.state.playing = false;
+            self.state.buffering = false;
         }
         while let Ok(action) = self.tray_rx.try_recv() {
             match action {
@@ -793,11 +815,15 @@ impl MusicApp {
                         self.expanded = false;
                     }
                     ui.add_space(10.);
-                    if self.connected {
+                    if self.connected && !self.player.needs_login() {
                         ui.label(
-                            RichText::new("●  Google account saved")
-                                .small()
-                                .color(ACCENT),
+                            RichText::new(if self.player.authenticated() == Some(true) {
+                                "●  Player connected"
+                            } else {
+                                "●  Checking playback session…"
+                            })
+                            .small()
+                            .color(ACCENT),
                         )
                         .on_hover_text(&self.account_status);
                     } else if ui
@@ -812,7 +838,9 @@ impl MusicApp {
                         .clicked()
                     {
                         self.connecting = true;
-                        self.backend.send(Request::Connect);
+                        self.backend.send(Request::Connect {
+                            force_login: self.player.authenticated() != Some(true),
+                        });
                     }
                 });
             });
@@ -1317,7 +1345,9 @@ impl MusicApp {
                 .clicked()
             {
                 self.connecting = true;
-                self.backend.send(Request::Connect);
+                self.backend.send(Request::Connect {
+                    force_login: self.player.authenticated() != Some(true),
+                });
             }
             return;
         }
@@ -1460,14 +1490,31 @@ impl MusicApp {
                 && self.state.position >= 29.
                 && self.timeline.pending_confirmed() =>
             {
-                println!("Pause and seek verified");
+                println!(
+                    "Pause and seek verified; reloading the playback document to verify login rebinding"
+                );
+                self.player.reconnect();
+                check.stage = 7;
+            }
+            7 if self.player.is_ready()
+                && self.player.authenticated() == Some(true)
+                && !self.player.is_restoring()
+                && !self.state.playing
+                && self.state.position >= 29.
+                && self.current == Some(0) =>
+            {
+                println!(
+                    "Playback document reauthenticated; paused track, position and mute restored"
+                );
                 self.player.send(PlayerCommand::Toggle);
                 check.stage = 3;
             }
             3 if self.state.playing && self.state.position > 31. && !self.state.ad => {
                 if self.connected && !check.session_refreshed {
                     self.connecting = true;
-                    self.backend.send(Request::Connect);
+                    self.backend.send(Request::Connect {
+                        force_login: self.player.authenticated() != Some(true),
+                    });
                     check.session_refreshed = true;
                     check.stage = 6;
                 } else {
@@ -1524,7 +1571,12 @@ impl MusicApp {
                     self.state.video_height
                 );
                 println!(
-                    "Streaming, video, audio mode, pause, seek and automatic queue advance checks passed"
+                    "Authenticated player: {}; advertisements observed: {}",
+                    self.player.authenticated() == Some(true),
+                    check.saw_ad
+                );
+                println!(
+                    "Streaming, video, audio mode, pause, seek, login rebinding and automatic queue advance checks passed"
                 );
                 self.player.send(PlayerCommand::Stop);
                 self.quit = true;
@@ -1552,6 +1604,7 @@ impl MusicApp {
             return;
         }
         if self.connected
+            && self.player.authenticated() == Some(true)
             && self.library_loaded
             && !self.history_loading
             && self.account_status.starts_with("Google account connected")
@@ -1565,7 +1618,9 @@ impl MusicApp {
                 );
                 check.phase = 1;
                 self.connecting = true;
-                self.backend.send(Request::Connect);
+                self.backend.send(Request::Connect {
+                    force_login: self.player.authenticated() != Some(true),
+                });
             } else {
                 check.phase = 2;
                 println!("Google account refreshed from the app profile without opening login");
@@ -1757,6 +1812,14 @@ impl MusicApp {
         ui.heading("Account");
         ui.add_space(8.);
         ui.label(&self.account_status);
+        ui.label(match self.player.authenticated() {
+            Some(true) => "Playback account: signed in to YouTube Music",
+            Some(false) if self.player.needs_login() => {
+                "Playback account: signed out. Reconnect the account with YouTube Premium below."
+            }
+            Some(false) => "Playback account: guest",
+            None => "Playback account: checking…",
+        });
         ui.label(RichText::new("Your saved account is restored automatically. Google sign-in opens only when needed.").small().color(MUTED));
         if ui
             .add_enabled(
@@ -1764,7 +1827,9 @@ impl MusicApp {
                 egui::Button::new(if self.connecting {
                     "Connecting…"
                 } else {
-                    if self.connected {
+                    if self.player.needs_login() {
+                        "Reconnect playback account"
+                    } else if self.connected {
                         "Refresh connection"
                     } else {
                         "Continue with Google"
@@ -1774,9 +1839,13 @@ impl MusicApp {
             .clicked()
         {
             self.connecting = true;
-            self.backend.send(Request::Connect);
+            self.backend.send(Request::Connect {
+                force_login: self.player.authenticated() != Some(true),
+            });
         }
-        if self.connected && ui.button("Disconnect native session").clicked() {
+        if (self.connected || self.player.needs_login())
+            && ui.button("Disconnect native session").clicked()
+        {
             self.backend.send(Request::Disconnect);
             self.connecting = false;
             self.playlists.clear();

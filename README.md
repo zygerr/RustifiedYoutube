@@ -31,9 +31,11 @@ cargo build --workspace --locked
 cargo run -p rustified-youtube-native --locked
 ```
 
-Choose **Continue with Google** to connect. The app first reuses the account already saved in its own WebView2 profile; a Google window opens only when interactive sign-in is necessary. Complete any Google challenges yourself. **Settings → Account → Refresh connection** rechecks the current profile without reloading playback.
+Choose **Continue with Google** to connect. The app first reuses the account already saved in its own WebView2 profile; a Google window opens only when interactive sign-in is necessary. Complete any Google challenges yourself. **Settings → Account** shows the actual playback login separately from the library connection. **Refresh connection** rechecks an authenticated profile without reloading playback; **Reconnect playback account** opens Google sign-in when the media page is signed out. Completing interactive login reloads the media page and restores the selected track, position, pause state, volume, and Audio/Video mode.
 
 The native library session is synchronized from the browser at startup and every five minutes. Rejected authenticated requests trigger a coordinated refresh and one retry. Temporary connection or server errors keep the saved account, and public search remains available if Google requires a new sign-in. Google can still expire or revoke a login; the client cannot prevent that.
+
+A saved library credential does not prove that playback is authenticated. When an account is saved, playback waits for the media page to confirm sign-in; a signed-out player offers reconnection instead of silently starting as a guest. Use the Google account with the Premium subscription for its playback benefits.
 
 The player and temporary sign-in window reuse only this application's existing dedicated WebView2 profile. Search can also work without connecting an account; playback remains subject to YouTube's availability, account requirements, and normal advertisements. Popup navigation is disabled in the media surface; use the separate sign-in window for authentication.
 
@@ -74,6 +76,7 @@ cargo run -p rustified-core --example smoke -- --authenticated
 ./target/debug/RustifiedYoutube.exe --smoke-stream
 ./target/debug/RustifiedYoutube.exe --smoke-rpc
 ./target/debug/RustifiedYoutube.exe --smoke-account
+./target/debug/RustifiedYoutube.exe --smoke-player-session
 ./target/debug/RustifiedYoutube.exe --smoke-artwork
 ```
 
@@ -81,7 +84,7 @@ The streaming check opens a temporary app instance with volume zero, measures tw
 
 The RPC check verifies the real Discord handshake and acknowledgement of a clear-activity command without displaying a test song. Unit tests also cover presence timestamps, pause/ad clearing, Unicode limits, fragmented IPC frames, pings, and immediate volume protection.
 
-The account check restores the current profile, reads library/history counts without logging their names, refreshes the connection, and exits. It never opens an interactive Google login, starts music, publishes Discord presence, or changes saved UI preferences. Running it again checks restoration across app restarts. The streaming check also refreshes an existing account during playback and verifies that the current track and position are preserved.
+The player-session check verifies Google sign-in in the actual playback document and fails when it is anonymous. The account check requires this same browser authentication, restores the current profile, reads library/history counts without logging their names, refreshes the connection, and exits. It never opens an interactive Google login, starts music, publishes Discord presence, or changes saved UI preferences. Running it again checks restoration across app restarts. The streaming check also refreshes an existing account during playback and verifies that the current track and position are preserved.
 
 The artwork check fetches public album/video images, verifies that the expanded images retain more resolution than browsing images, and prints dimensions only. Unit tests cover high-resolution source selection, URL fallbacks, bounded decoding, and artwork wheel behavior alongside the volume slider.
 
@@ -100,7 +103,7 @@ The [Windows workflow](https://github.com/zygerr/RustifiedYoutube/actions/workfl
 
 ## Local data
 
-The dedicated Google/WebView2 profile remains at `%LOCALAPPDATA%\io.github.zygerr.rustifiedyoutube\webview`. The metadata API session is stored alongside it as `session.dpapi`, encrypted with Windows DPAPI for the current Windows user and updated atomically. Version 0.3.4 also saves the profile's browser User-Agent and reads the previous session format automatically. The application never copies another browser's profile. Session cookies are read through native WebView2 APIs, including HttpOnly cookies, and never pass through JavaScript IPC, logs, or Discord. Do not share these files.
+The dedicated Google/WebView2 profile remains at `%LOCALAPPDATA%\io.github.zygerr.rustifiedyoutube\webview`. The metadata API session is stored alongside it as `session.dpapi`, encrypted with Windows DPAPI for the current Windows user and updated atomically. Version 0.3.6 also preserves the selected Google account index for the player and metadata API. Version 0.3.4 saves the profile's browser User-Agent and reads the previous session format automatically. The application never copies another browser's profile. Session cookies are read through native WebView2 APIs, including HttpOnly cookies, and never pass through JavaScript IPC, logs, or Discord. Do not share these files.
 
 **Disconnect native session** removes the encrypted metadata API session and writes `session.disabled` to stop automatic native reconnection. It does not sign out the separate Google/WebView2 profile. **Continue with Google** enables reconnection and can restore that account. Uninstalling preserves user data. UI preferences are stored in eframe's per-user application directory. Old `audio-buffer` files from earlier versions are not used by version 0.3.
 

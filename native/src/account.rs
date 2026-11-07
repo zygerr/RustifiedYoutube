@@ -15,7 +15,7 @@ use std::{
 };
 use tokio::sync::{Mutex, Notify, RwLock, watch};
 pub fn smoke_active() -> bool {
-    std::env::args().any(|arg| arg == "--smoke-account")
+    std::env::args().any(|arg| matches!(arg.as_str(), "--smoke-account" | "--smoke-player-session"))
 }
 
 struct State {
@@ -89,10 +89,13 @@ impl Account {
             self.send(Response::Ready(value));
         }
     }
-    async fn store(&self, saved: SavedSession) -> Result<()> {
+    async fn store(&self, mut saved: SavedSession) -> Result<()> {
         let mut state = self.state.write().await;
         if !state.enabled {
             return Ok(());
+        }
+        if saved.auth_user.is_none() {
+            saved.auth_user = state.saved.as_ref().and_then(|saved| saved.auth_user);
         }
         if state.saved.as_ref() != Some(&saved) {
             session::save_session(&saved)?;
@@ -273,7 +276,7 @@ impl Account {
             result
         }
     }
-    pub async fn connect(&self) -> Result<()> {
+    pub async fn connect(&self, force_login: bool) -> Result<bool> {
         let _refresh = self.refresh.lock().await;
         session::enable_native()?;
         let epoch = {
@@ -286,12 +289,16 @@ impl Account {
             }
         };
         self.status("Reusing the Google account saved in this app…");
-        let captured = self.capture().await?;
+        let captured = if force_login {
+            None
+        } else {
+            self.capture().await?
+        };
         anyhow::ensure!(
             self.control_epoch.load(Ordering::SeqCst) == epoch,
             "Account connection changed"
         );
-        let mut needs_login = captured.is_none();
+        let mut needs_login = force_login || captured.is_none();
         if let Some(saved) = captured {
             self.store(saved).await?;
             self.state.write().await.client = None;
@@ -337,7 +344,7 @@ impl Account {
         );
         self.connected(true);
         self.status("Google account connected · automatic session refresh is on");
-        Ok(())
+        Ok(needs_login)
     }
     pub async fn disconnect(&self) -> Result<()> {
         self.control_epoch.fetch_add(1, Ordering::SeqCst);
@@ -364,6 +371,7 @@ mod tests {
         let saved = SavedSession {
             cookies: "SAPISID=fixture;".into(),
             user_agent: Some("Fixture browser".into()),
+            auth_user: None,
         };
         (
             Arc::new(Account {
@@ -407,6 +415,7 @@ mod tests {
                 result: Ok(Some(SavedSession {
                     cookies: "SAPISID=other;".into(),
                     user_agent: None,
+                    auth_user: None,
                 })),
             })
             .await;
@@ -437,6 +446,7 @@ mod tests {
                 result: Ok(Some(SavedSession {
                     cookies: "SAPISID=fresh;".into(),
                     user_agent: None,
+                    auth_user: None,
                 })),
             })
             .await;

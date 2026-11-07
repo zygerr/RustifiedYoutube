@@ -1,9 +1,11 @@
 (() => {
   if (location.origin !== 'https://music.youtube.com' || window.__rustifiedMedia) return;
-  const session = { generation: 0, target: '', playing: false, volume: .5, video: false, ready: false, counterpartUntil: 0, changed: 0, error: null, modeApplied: false, appliedMode: null, transition: null, diagnostic: false, lastPosition: 0, lastDuration: 0, seekRequest: null, seekAck: 0 };
+  const session = { generation: 0, target: '', playing: false, volume: .5, video: false, ready: false, counterpartUntil: 0, changed: 0, error: null, modeApplied: false, appliedMode: null, transition: null, diagnostic: false, lastPosition: 0, lastDuration: 0, seekRequest: null, seekAck: 0, restore: null, restoreSeek: false, fallbackMode: null };
   let last = '', boundVideo = null, ended = false, playAttempt = 0, lastAd = false;
   if (Number.isFinite(window.__rustifiedInitialVolume)) session.volume=Math.max(0,Math.min(1,window.__rustifiedInitialVolume));
-  const send = data => window.ipc.postMessage(JSON.stringify(data));
+  const documentId = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+  const send = data => window.ipc.postMessage(JSON.stringify({...data, document_id:documentId}));
+  let lastIdentity='';
   const api = () => document.querySelector('ytmusic-player')?.playerApi || document.querySelector('ytmusic-player-bar')?.playerApi || document.getElementById('movie_player');
   const video = () => api()?.getVideoElement?.() || api()?.querySelector?.('video') || document.querySelector('#movie_player video') || document.querySelector('ytmusic-player video') || document.querySelector('video');
   const position = () => Number(api()?.getCurrentTime?.() ?? video()?.currentTime ?? 0);
@@ -56,12 +58,17 @@
     const player = api();
     return player?.getVideoData?.()?.video_id || player?.getPlayerResponse?.()?.videoDetails?.videoId || '';
   };
+  const sameSong = (before,after) => {
+    const words=text=>new Set(text.normalize('NFKC').toLowerCase().replace(/\([^)]*\)|\[[^\]]*\]/g,' ').replace(/[^\p{L}\p{N}]+/gu,' ').split(' ').filter(word=>word.length>2 && !/^(official|video|audio|lyrics|lyric|hd|4k|20\d\d)$/.test(word)));
+    const a=words(before),b=words(after);
+    return !a.size || !b.size || [...a].filter(word=>b.has(word)).length/Math.min(a.size,b.size)>=.6;
+  };
   const setMode = () => {
-    if (session.transition) return;
+    if (session.transition || (session.video===session.fallbackMode)) return;
     session.appliedMode = session.video;
     const button = document.querySelector(session.video ? 'ytmusic-av-toggle .video-button' : 'ytmusic-av-toggle .song-button');
     if (button && !button.disabled && button.getAttribute('aria-pressed') !== 'true' && !button.hasAttribute('selected')) {
-      session.transition = { source: video()?.currentSrc, started: performance.now(), loaded: false, seek: null, seekRevision: 0 };
+      session.transition = { id:session.target,title:String(api()?.getVideoData?.()?.title || ''),position:position(),source: video()?.currentSrc, started: performance.now(), loaded: false, seek: null, seekRevision: 0 };
       session.counterpartUntil = performance.now() + 10000;
       session.changed = performance.now();
       applyVolume();
@@ -110,6 +117,9 @@
           session.lastDuration=0;
           session.seekRequest=null;
           session.seekAck=0;
+          session.fallbackMode=typeof command.fallback_mode==='boolean'?command.fallback_mode:null;
+          session.restoreSeek=false;
+          session.restore=Number.isFinite(command.position) && command.position>0 ? {position:command.position,revision:command.revision || 0} : null;
           ended = false;
           applyVolume();
           document.dispatchEvent(new CustomEvent('yt-navigate', { detail: { endpoint: { watchEndpoint: { videoId: command.id, playlistId: 'RDAMVM' + command.id } } } }));
@@ -160,6 +170,14 @@
       session.ready = true;
       send({ type: 'ready' });
     }
+    if (session.ready) {
+      const signed=window.ytcfg?.get?.('LOGGED_IN');
+      const rawIndex=window.ytcfg?.get?.('SESSION_INDEX');
+      const index=rawIndex===undefined || rawIndex===null ? NaN : Number(rawIndex);
+      const identity={signed_in:typeof signed==='boolean'?signed:null,auth_user:signed===true && Number.isInteger(index) && index>=0 && index<=255?index:null};
+      const encoded=JSON.stringify(identity);
+      if(encoded!==lastIdentity) {lastIdentity=encoded;send({type:'session',...identity});}
+    }
     if (media && media !== boundVideo) {
       boundVideo = media;
       media.addEventListener('loadstart', () => { if (session.transition) session.transition.loaded = true; });
@@ -185,8 +203,18 @@
       session.playing=false;
       media?.pause();
     }
-    if (!ad && session.transition && id !== session.target && id && performance.now() < session.counterpartUntil) {
-      session.target = id;
+    if (!ad && session.transition && id !== session.transition.id && id && performance.now() < session.counterpartUntil) {
+      const transition=session.transition;
+      const title=String(player?.getVideoData?.()?.title || '');
+      if (media?.readyState>=2 && !sameSong(transition.title,title)) {
+        // A stale official A/V toggle can point at the previous radio item.
+        // Keep the requested song's original source for audio in that case.
+        window.__rustifiedMedia.command({op:'play',id:transition.id,generation:session.generation,
+          position:transition.seek ?? transition.position,revision:transition.seekRevision,
+          paused:!session.playing,fallback_mode:session.video});
+        return;
+      }
+      if (media?.readyState>=2) session.target = id;
     }
     const matches = id === session.target;
     if (!matches && !ad) {
@@ -194,7 +222,7 @@
       if (session.playing && performance.now() - session.changed > 30000) session.error = 'YouTube could not open this track. Reconnect your account or try another result.';
     } else if (media) {
       if (!ad && !session.modeApplied && media.readyState >= 1) { session.modeApplied = true; setMode(); }
-      if (session.playing && media.paused && !ended && performance.now() - playAttempt > 1000) {
+      if (session.playing && !session.restore && !session.restoreSeek && media.paused && !ended && performance.now() - playAttempt > 1000) {
         playAttempt = performance.now();
         applyVolume();
         player?.playVideo?.();
@@ -206,7 +234,7 @@
       if (!ad && transition && media.readyState >= 3) {
         const elapsed = performance.now() - transition.started;
         const state = player?.getPlayerState?.();
-        if (elapsed > 1800 && (state === undefined || state === 1 || state === 2)) {
+        if (elapsed > 1800 && (state === undefined || state === 1 || state === 2 || (!session.playing && media.paused && !media.seeking))) {
           session.transition = null;
           trace('mode_settled',transition.seek);
           if (session.appliedMode !== session.video) {
@@ -219,8 +247,12 @@
         }
       }
     }
+    if (session.restore && matches && !ad && session.modeApplied && !session.transition && media?.readyState>=2) {
+      const restore=session.restore;session.restore=null;session.restoreSeek=true;seek(restore.position,restore.revision);
+    }
     if (session.seekRequest && matches && !ad && !session.transition && media && !media.seeking && media.readyState >= 2 &&
         Math.abs(position()-session.seekRequest.target) < 1.5) {
+      session.restoreSeek=false;
       session.seekAck=session.seekRequest.revision;
       session.seekRequest=null;
     }
@@ -230,8 +262,8 @@
       type: 'state', generation: session.generation, video_id: id,
       seek_ack: session.seekAck,
       title: String(player?.getVideoData?.()?.title || '').slice(0,512),
-      transition: !!session.transition,
-      position: matches && Number.isFinite(position()) ? Math.round(position() * 100) / 100 : 0,
+      transition: !!session.transition || !!session.restore || session.restoreSeek,
+      position: session.restore ? session.restore.position : matches && Number.isFinite(position()) ? Math.round(position() * 100) / 100 : 0,
       duration: matches && Number.isFinite(duration()) ? duration() : 0,
       playing: !!((matches || ad) && media && !media.paused && !media.ended),
       buffering: session.playing && !session.error && (!matches || !media || media.readyState < 3),

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.6
+
+- Verify the actual playback page's Google login independently of the native library's saved API cookies.
+- Hold playback when a saved account is expected but the media page is signed out, and show a playback reconnection action instead of silently playing as a guest.
+- Open interactive Google sign-in when the player is disconnected even if playlists still load. Follow the official sign-in link from the connection window.
+- Reload the playback document after interactive login, preserving the selected track, position, pause state, volume, and Audio/Video mode. Keep metadata-only refreshes uninterrupted.
+- Preserve the selected Google account index in encrypted session storage and apply it to both playback and metadata requests.
+- Keep the requested song source if an official Audio/Video toggle points at a different radio item after reloading.
+- Reject playback updates from a replaced document and verify actual browser authentication in account smoke checks.
+
 ## 0.3.5
 
 - Select the largest artwork source returned by YouTube Music instead of the thumbnail nearest 256 px.

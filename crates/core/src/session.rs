@@ -62,6 +62,8 @@ fn crypt(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>> {
 pub struct SavedSession {
     pub cookies: String,
     pub user_agent: Option<String>,
+    #[serde(default)]
+    pub auth_user: Option<u8>,
 }
 impl SavedSession {
     pub fn valid(&self) -> bool {
@@ -101,6 +103,7 @@ fn decode_session(text: &str) -> Result<SavedSession> {
         SavedSession {
             cookies: text.into(),
             user_agent: None,
+            auth_user: None,
         }
     };
     anyhow::ensure!(session.valid(), "Saved session is incomplete");
@@ -113,10 +116,17 @@ pub fn save_cookie(cookie: &str) -> Result<()> {
     save_session(&SavedSession {
         cookies: cookie.into(),
         user_agent: None,
+        auth_user: None,
     })
 }
 pub fn native_enabled() -> bool {
     app_dir().is_ok_and(|directory| !directory.join("session.disabled").exists())
+}
+pub fn music_url(auth_user: Option<u8>) -> String {
+    match auth_user {
+        Some(index) => format!("https://music.youtube.com/?authuser={index}"),
+        None => "https://music.youtube.com/".into(),
+    }
 }
 pub fn enable_native() -> Result<()> {
     let marker = app_dir()?.join("session.disabled");
@@ -171,6 +181,28 @@ mod tests {
         ] {
             assert!(super::decode_session(cookie).is_err());
         }
+    }
+    #[test]
+    fn selected_account_survives_serialization_and_legacy_json_migrates() {
+        let saved = super::decode_session(
+            r#"{"cookies":"SAPISID=fixture;","user_agent":null,"auth_user":2}"#,
+        )
+        .unwrap();
+        assert_eq!(saved.auth_user, Some(2));
+        assert_eq!(
+            super::music_url(saved.auth_user),
+            "https://music.youtube.com/?authuser=2"
+        );
+        let legacy =
+            super::decode_session(r#"{"cookies":"SAPISID=fixture;","user_agent":null}"#).unwrap();
+        assert_eq!(legacy.auth_user, None);
+        assert_eq!(super::music_url(None), "https://music.youtube.com/");
+        assert_eq!(
+            super::decode_session(&serde_json::to_string(&saved).unwrap())
+                .unwrap()
+                .auth_user,
+            Some(2)
+        );
     }
     #[test]
     fn encrypted_session_roundtrips_without_writing_user_profile() {

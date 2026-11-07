@@ -37,7 +37,14 @@ pub struct PlayerState {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BridgeEvent {
-    Ready,
+    Ready {
+        document_id: String,
+    },
+    Session {
+        document_id: String,
+        #[serde(flatten)]
+        identity: crate::playback_session::Identity,
+    },
     Trace {
         phase: TracePhase,
         position: f64,
@@ -51,6 +58,7 @@ enum BridgeEvent {
         action: Shortcut,
     },
     State {
+        document_id: String,
         seek_ack: u64,
         title: String,
         transition: bool,
@@ -98,7 +106,6 @@ pub struct Player {
     updates: Sender<PlayerState>,
     pub rx: Receiver<PlayerState>,
     ready: Cell<bool>,
-    pending: RefCell<Vec<Value>>,
     generation: Cell<u64>,
     requested: Cell<Option<Instant>>,
     volume: Cell<f64>,
@@ -110,6 +117,12 @@ pub struct Player {
     session_tx: Sender<crate::account::Capture>,
     session_checked: Cell<Option<Instant>>,
     repaint: egui::Context,
+    identity: Cell<crate::playback_session::Identity>,
+    expected_account: Cell<bool>,
+    document: RefCell<Option<String>>,
+    resume: RefCell<Option<Value>>,
+    restoring: Cell<bool>,
+    waiting_restore: Cell<bool>,
 }
 impl Player {
     pub fn start(cc: &eframe::CreationContext<'_>, volume: f64) -> Self {
@@ -123,7 +136,6 @@ impl Player {
             updates,
             rx,
             ready: Cell::new(false),
-            pending: RefCell::new(Vec::new()),
             generation: Cell::new(0),
             requested: Cell::new(None),
             volume: Cell::new(volume.clamp(0.0, 1.0)),
@@ -135,6 +147,18 @@ impl Player {
             session_tx,
             session_checked: Cell::new(None),
             repaint: cc.egui_ctx.clone(),
+            identity: Cell::new(Default::default()),
+            expected_account: Cell::new(
+                rustified_core::session::native_enabled()
+                    && rustified_core::session::load_session()
+                        .ok()
+                        .flatten()
+                        .is_some(),
+            ),
+            document: RefCell::new(None),
+            resume: RefCell::new(None),
+            restoring: Cell::new(false),
+            waiting_restore: Cell::new(false),
         };
         if crate::preview::active() {
             return result;
@@ -168,7 +192,12 @@ impl Player {
                 })
                 .with_navigation_handler(|url| url == "about:blank" || playback_origin(&url))
                 .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
-                .with_url("https://music.youtube.com/")
+                .with_url(rustified_core::session::music_url(
+                    rustified_core::session::load_session()
+                        .ok()
+                        .flatten()
+                        .and_then(|saved| saved.auth_user),
+                ))
                 .build_as_child(cc)?;
             Ok((webview, context))
         })();
@@ -192,13 +221,56 @@ impl Player {
     pub fn pump(&self) {
         while let Ok(event) = self.incoming.try_recv() {
             match event {
+                BridgeEvent::Session {
+                    document_id,
+                    identity,
+                } => {
+                    if self.document.borrow().as_ref() != Some(&document_id) {
+                        continue;
+                    }
+                    let previous = self.identity.replace(identity);
+                    if identity.signed_in == Some(true)
+                        && previous != identity
+                        && rustified_core::session::native_enabled()
+                    {
+                        self.capture_session(0);
+                    }
+                    if std::env::args().any(|arg| arg == "--smoke-player-session")
+                        && identity.signed_in.is_some()
+                    {
+                        println!(
+                            "Playback document authenticated: {}",
+                            identity.signed_in == Some(true)
+                        );
+                        if identity.signed_in != Some(true) {
+                            crate::STREAM_CHECK_FAILED
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        self.quit_requested.set(true);
+                    }
+                    if self.allowed() {
+                        self.flush();
+                    } else {
+                        self.eval(&json!({"op":"pause"}));
+                        self.requested.set(None);
+                        self.restoring.set(true);
+                    }
+                }
                 BridgeEvent::Shortcut {
                     action: Shortcut::Toggle,
                 } => self.send(PlayerCommand::Toggle),
                 BridgeEvent::Shortcut {
                     action: Shortcut::Quit,
                 } => self.quit_requested.set(true),
-                BridgeEvent::Ready => {
+                BridgeEvent::Ready { document_id } => {
+                    if document_id.len() > 128 {
+                        continue;
+                    }
+                    *self.document.borrow_mut() = Some(document_id);
+                    self.identity.set(Default::default());
+                    if self.resume.borrow().is_some() {
+                        self.restoring.set(true);
+                    }
                     self.ready.set(true);
                     self.session_checked.set(Some(Instant::now()));
                     if rustified_core::session::native_enabled() {
@@ -209,8 +281,8 @@ impl Player {
                     }
                     self.eval(&json!({"op":"volume","value":self.volume.get()}));
                     self.eval(&json!({"op":"mode","video":self.video.get()}));
-                    for command in self.pending.borrow_mut().drain(..) {
-                        self.eval(&command);
+                    if self.allowed() {
+                        self.flush();
                     }
                 }
                 BridgeEvent::Trace {
@@ -229,6 +301,7 @@ impl Player {
                     }
                 }
                 BridgeEvent::State {
+                    document_id,
                     seek_ack,
                     title,
                     transition,
@@ -245,7 +318,9 @@ impl Player {
                     video_available,
                     error,
                 } => {
-                    if generation != self.generation.get()
+                    if self.document.borrow().as_ref() != Some(&document_id)
+                        || !self.allowed()
+                        || generation != self.generation.get()
                         || !position.is_finite()
                         || !duration.is_finite()
                         || position < 0.0
@@ -255,6 +330,22 @@ impl Player {
                     }
                     if !video_id.is_empty() && !rustified_core::model::valid_video_id(&video_id) {
                         continue;
+                    }
+                    if self.waiting_restore.get()
+                        && error.is_none()
+                        && (transition || buffering || duration <= 0.)
+                    {
+                        continue;
+                    }
+                    self.waiting_restore.set(false);
+                    if !ad
+                        && !transition
+                        && duration > 0.
+                        && let Some(resume) = self.resume.borrow_mut().as_mut()
+                    {
+                        resume["position"] = json!(position);
+                        resume["paused"] = json!(!playing);
+                        resume["revision"] = json!(seek_ack);
                     }
                     if playing || error.is_some() || (!buffering && duration > 0.) {
                         self.requested.set(None);
@@ -306,10 +397,14 @@ impl Player {
                 windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32))
             })?;
             let core = unsafe { webview.controller().CoreWebView2()? };
-            rustified_core::browser_session::capture(&core, move |result| {
-                let _ = tx.send(crate::account::Capture { id, result });
-                repaint.request_repaint();
-            })
+            rustified_core::browser_session::capture(
+                &core,
+                self.identity.get().auth_user,
+                move |result| {
+                    let _ = tx.send(crate::account::Capture { id, result });
+                    repaint.request_repaint();
+                },
+            )
         })();
         if result.is_err() {
             let _ = self.session_tx.send(crate::account::Capture {
@@ -325,6 +420,53 @@ impl Player {
                 webview.evaluate_script(&format!("window.__rustifiedMedia?.command({command});"));
         }
     }
+    pub fn authenticated(&self) -> Option<bool> {
+        self.identity.get().signed_in
+    }
+    pub fn is_restoring(&self) -> bool {
+        self.restoring.get() || self.waiting_restore.get()
+    }
+    pub fn needs_login(&self) -> bool {
+        self.expected_account.get() && self.authenticated() == Some(false)
+    }
+    fn allowed(&self) -> bool {
+        crate::playback_session::allowed(self.expected_account.get(), self.identity.get())
+    }
+    pub fn require_account(&self, expected: bool) {
+        self.expected_account.set(expected);
+        if !self.allowed() {
+            self.eval(&json!({"op":"pause"}));
+            self.requested.set(None);
+        } else if self.ready.get() {
+            self.flush();
+        }
+    }
+    fn flush(&self) {
+        self.eval(&json!({"op":"volume","value":self.volume.get()}));
+        if self.restoring.replace(false)
+            && let Some(resume) = self.resume.borrow().as_ref()
+        {
+            self.eval(&json!({"op":"mode","video":self.video.get()}));
+            self.waiting_restore.set(true);
+            self.eval(resume);
+            self.requested.set(Some(Instant::now()));
+        }
+    }
+    pub fn reconnect(&self) {
+        self.eval(&json!({"op":"pause"}));
+        self.ready.set(false);
+        self.identity.set(Default::default());
+        *self.document.borrow_mut() = None;
+        self.restoring.set(true);
+        self.requested.set(None);
+        if let Some(webview) = &self.webview {
+            let index = rustified_core::session::load_session()
+                .ok()
+                .flatten()
+                .and_then(|saved| saved.auth_user);
+            let _ = webview.load_url(&rustified_core::session::music_url(index));
+        }
+    }
     pub fn send(&self, command: PlayerCommand) {
         let message = match command {
             PlayerCommand::Play {
@@ -336,12 +478,23 @@ impl Player {
                 }
                 self.generation.set(generation);
                 self.requested.set(Some(Instant::now()));
-                self.pending.borrow_mut().clear();
-                json!({"op":"play","generation":generation,"id":video_id})
+                let play = json!({"op":"play","generation":generation,"id":video_id,"position":0,"paused":false});
+                *self.resume.borrow_mut() = Some(play.clone());
+                self.restoring.set(false);
+                self.waiting_restore.set(false);
+                play
             }
-            PlayerCommand::Toggle => json!({"op":"toggle"}),
+            PlayerCommand::Toggle => {
+                if let Some(resume) = self.resume.borrow_mut().as_mut() {
+                    resume["paused"] = json!(!resume["paused"].as_bool().unwrap_or(false));
+                }
+                json!({"op":"toggle"})
+            }
             PlayerCommand::Stop => {
                 self.requested.set(None);
+                if let Some(resume) = self.resume.borrow_mut().as_mut() {
+                    resume["paused"] = json!(true);
+                }
                 json!({"op":"pause"})
             }
             PlayerCommand::Volume(value) => {
@@ -353,20 +506,25 @@ impl Player {
                 json!({"op":"mode","video":video})
             }
         };
-        if self.ready.get() {
+        if self.ready.get() && self.allowed() {
             self.eval(&message);
         } else {
-            self.pending.borrow_mut().push(message);
+            self.restoring.set(true);
+            self.requested.set(None);
         }
     }
     pub fn seek(&self, seconds: f64) -> u64 {
         let revision = self.seek_revision.get() + 1;
         self.seek_revision.set(revision);
+        if let Some(resume) = self.resume.borrow_mut().as_mut() {
+            resume["position"] = json!(seconds.max(0.));
+            resume["revision"] = json!(revision);
+        }
         let message = json!({"op":"seek","value":seconds.max(0.0),"revision":revision});
-        if self.ready.get() {
+        if self.ready.get() && self.allowed() {
             self.eval(&message);
         } else {
-            self.pending.borrow_mut().push(message);
+            self.restoring.set(true);
         }
         revision
     }

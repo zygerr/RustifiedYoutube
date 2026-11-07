@@ -13,7 +13,7 @@ pub enum Request {
     Library,
     History,
     Discover,
-    Connect,
+    Connect { force_login: bool },
     Captured(crate::account::Capture),
     Disconnect,
     Like(String, bool),
@@ -24,7 +24,7 @@ pub enum Response {
     Ready(bool),
     CaptureSession(u64),
     AccountStatus(String),
-    ConnectFinished,
+    ConnectFinished { browser_login: bool },
     Tracks(u64, Result<Vec<Track>, String>),
     Library(Result<Vec<Playlist>, String>),
     History(Result<Vec<Track>, String>),
@@ -99,10 +99,11 @@ impl Backend {
                                 let success=account.execute(|client|{let id=id.clone();async move {client.like(&id,liked).await}}).await.is_ok();
                                 send(&updates, &ctx, Response::Liked(id, liked, success));
                             }
-                            Request::Connect => {
-                                if account.connect().await.is_err() {send(&updates,&ctx,Response::AccountStatus("Connection couldn't finish. Your saved account is kept; try again when online, or complete Google sign-in if prompted.".into()));}
+                            Request::Connect {force_login} => {
+                                let result=account.connect(force_login).await;
+                                if result.is_err() {send(&updates,&ctx,Response::AccountStatus("Connection couldn't finish. Your saved account is kept; try again when online, or complete Google sign-in if prompted.".into()));}
                                 else {send(&updates,&ctx,Response::Ready(true));}
-                                send(&updates,&ctx,Response::ConnectFinished);
+                                send(&updates,&ctx,Response::ConnectFinished {browser_login:result.unwrap_or(false)});
                             }
                             Request::Captured(capture)=>account.captured(capture).await,
                             Request::Disconnect => {

@@ -3927,9 +3927,10 @@ dependencies = [
 
 [[package]]
 name = "rustified-auth"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "rustified-core",
+ "serde_json",
  "tao",
  "webview2-com",
  "windows 0.62.2",
@@ -3938,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "rustified-core"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3955,7 +3956,7 @@ dependencies = [
 
 [[package]]
 name = "rustified-youtube-native"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "anyhow",
  "eframe",

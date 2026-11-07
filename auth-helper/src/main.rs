@@ -10,7 +10,7 @@ use wry::{WebContext, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindow
 
 #[derive(Clone)]
 enum LoginEvent {
-    CheckSession,
+    CheckSession(Option<u8>),
     Checked(bool),
 }
 
@@ -24,17 +24,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let page_proxy = event_loop.create_proxy();
     let webview=WebViewBuilder::new_with_web_context(&mut context)
         .with_additional_browser_args("--autoplay-policy=no-user-gesture-required")
-        .with_url("https://music.youtube.com/")
+        .with_url(session::music_url(session::load_session().ok().flatten().and_then(|saved|saved.auth_user)))
         .with_initialization_script(r#"
             if (location.origin==='https://music.youtube.com') {
+                let redirected=false;
                 setInterval(()=>{
-                    if (window.ytcfg?.get?.('LOGGED_IN')===true && document.querySelector('ytmusic-player-bar')) window.ipc.postMessage('signed-in');
+                    const signed=window.ytcfg?.get?.('LOGGED_IN');
+                    if (signed===true && document.querySelector('ytmusic-player-bar')) {
+                        const raw=window.ytcfg?.get?.('SESSION_INDEX');
+                        const index=raw===null || raw===undefined?NaN:Number(raw);
+                        window.ipc.postMessage(JSON.stringify({kind:'signed-in',auth_user:Number.isInteger(index)&&index>=0&&index<=255?index:null}));
+                    } else if (signed===false && !redirected) {
+                        const link=document.querySelector('ytmusic-nav-bar a[href^="https://accounts.google.com/"]');
+                        if(link) {redirected=true;location.assign(link.href);}
+                    }
                 },1000);
             }
         "#)
         .with_ipc_handler(move|request| {
-            if request.uri().scheme_str()==Some("https") && request.uri().host()==Some("music.youtube.com") && request.body()=="signed-in" {
-                let _=page_proxy.send_event(LoginEvent::CheckSession);
+            if request.uri().scheme_str()==Some("https") && request.uri().host()==Some("music.youtube.com") && request.body().len()<=1024
+                && let Ok(message)=serde_json::from_str::<serde_json::Value>(request.body()) && message["kind"]=="signed-in" {
+                    let index=message["auth_user"].as_u64().and_then(|index|u8::try_from(index).ok());
+                    let _=page_proxy.send_event(LoginEvent::CheckSession(index));
             }
         })
         .with_new_window_req_handler(|url,_|if url.starts_with("https://")||url=="about:blank" {wry::NewWindowResponse::Allow} else {wry::NewWindowResponse::Deny})
@@ -58,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *control_flow = ControlFlow::Exit;
                 }
             }
-            Event::UserEvent(LoginEvent::CheckSession) if !pending => {
+            Event::UserEvent(LoginEvent::CheckSession(index)) if !pending => {
                 if !session::native_enabled() {
                     *control_flow = ControlFlow::Exit;
                     return;
@@ -67,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let proxy = proxy.clone();
                 let result = (|| -> windows::core::Result<()> {
                     let core = unsafe { webview.controller().CoreWebView2()? };
-                    browser_session::capture(&core, move |captured| {
+                    browser_session::capture(&core, index, move |captured| {
                         let success = if session::native_enabled() {
                             captured
                                 .ok()

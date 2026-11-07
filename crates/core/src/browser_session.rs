@@ -22,6 +22,7 @@ unsafe fn take(pointer: PWSTR) -> String {
 
 pub fn capture(
     core: &ICoreWebView2,
+    auth_user: Option<u8>,
     complete: impl FnOnce(Result<Option<SavedSession>, ()>) + 'static,
 ) -> windows::core::Result<()> {
     let core: ICoreWebView2_2 = core.cast()?;
@@ -58,6 +59,7 @@ pub fn capture(
             let session = SavedSession {
                 cookies: values.join("; ") + ";",
                 user_agent,
+                auth_user,
             };
             Ok(session.valid().then_some(session))
         })();

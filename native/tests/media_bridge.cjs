@@ -4,8 +4,9 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 
-function player(initialVolume = .5) {
+function player(initialVolume = .5, identity = {}, autoplay = true) {
   let now = 10000, interval, id = 'Fixture0001', clock = 10;
+  let title='NOVA LANE - Night shift (Official Video)',songButton=null;
   const messages = [];
   const events = new Map(), playedVolumes = [];
   const emit = (event, target) => {for (const listener of events.get(event) || []) listener({target});};
@@ -21,11 +22,11 @@ function player(initialVolume = .5) {
     play() {playedVolumes.push(this.volume);emit('play',this);this.paused=false;return Promise.resolve();}
   }
   let media = new MockMedia(), apiVolume = 100;
-  let acceptSeek = true;
+  let acceptSeek = true,unstarted=false;
   const api = {
-    getVideoElement: () => media, getVideoData: () => ({video_id: id}),
+    getVideoElement: () => media, getVideoData: () => ({video_id: id,title}),
     getCurrentTime: () => clock, getDuration: () => 200,
-    getPlayerState: () => media.paused ? 2 : 1,
+    getPlayerState: () => unstarted ? -1 : media.paused ? 2 : 1,
     getVolume: () => apiVolume, setVolume(value) {apiVolume=value;media.volume=value/100;},
     isMuted: () => media.muted, mute() {media.muted=true;}, unMute() {media.muted=false;},
     seekTo(target) {
@@ -43,14 +44,15 @@ function player(initialVolume = .5) {
     querySelector(selector) {
       if (selector === 'ytmusic-player') return {playerApi: api};
       if (selector === 'ytmusic-player-bar') return {};
+      if (selector === 'ytmusic-av-toggle .song-button') return songButton;
       return null;
     },
     getElementById: () => ({classList: {contains: () => false}}),
-    dispatchEvent(event) {id = event.detail.endpoint.watchEndpoint.videoId;}
+    dispatchEvent(event) {id = event.detail.endpoint.watchEndpoint.videoId;if(id==='Fixture0001')title='NOVA LANE - Night shift (Official Video)';}
   };
   const context = vm.createContext({
     document, location: {origin: 'https://music.youtube.com'},
-    window: {__rustifiedInitialVolume:initialVolume,ipc: {postMessage: text => messages.push(JSON.parse(text))}},
+    window: {ytcfg:{get:key=>identity[key]},__rustifiedInitialVolume:initialVolume,ipc: {postMessage: text => messages.push(JSON.parse(text))}},
     HTMLMediaElement:MockMedia,
     performance: {now: () => now},
     CustomEvent: class {constructor(type, options) {Object.assign(this, options);}},
@@ -62,11 +64,14 @@ function player(initialVolume = .5) {
     now += elapsed; interval();
     return messages.filter(message => message.type === 'state').at(-1);
   };
-  command({op: 'play', id, generation: 1}); tick();
+  if(autoplay) command({op: 'play', id, generation: 1}); tick();
   return {
-    command, tick, get media() {return media;}, playedVolumes,
+    command, tick, messages, identity, get media() {return media;}, playedVolumes,
     replaceMedia() {media=new MockMedia();return media;},
     resetYouTubeVolume(value) {apiVolume=value*100;media.volume=value;},
+    unstarted() {unstarted=true;},
+    enableAudioSwitch(nextTitle) {songButton={disabled:false,getAttribute:()=>null,hasAttribute:()=>false,click(){id='Fixture0002';title=nextTitle;clock=media.currentTime=0;}};},
+    get id(){return id;},
     rejectSeek() {acceptSeek = false;},
     clock(value) {clock = media.currentTime = value;},
     handoff() {id = 'Fixture0002'; clock = media.currentTime = 0; media.seeking = false; media.readyState = 4;}
@@ -140,4 +145,68 @@ test('a final-frame seek hands control back to the native queue before seeked', 
   assert.equal(state.ended, true);
   assert.equal(state.playing, false);
   assert.equal(p.media.paused, true);
+});
+
+
+test('playback identity is reported without a song and unknown is distinct from signed out', () => {
+  const p=player(.5,{},false);
+  let session=p.messages.filter(m=>m.type==='session').at(-1);
+  assert.equal(session.signed_in,null);assert.equal(session.auth_user,null);
+  p.identity.LOGGED_IN=false;p.tick();
+  session=p.messages.filter(m=>m.type==='session').at(-1);
+  assert.equal(session.signed_in,false);
+  p.identity.LOGGED_IN=true;p.identity.SESSION_INDEX='2';p.tick();
+  session=p.messages.filter(m=>m.type==='session').at(-1);
+  assert.equal(session.signed_in,true);assert.equal(session.auth_user,2);
+  assert.ok(session.document_id);
+});
+
+test('invalid and missing account selectors are never coerced to account zero', () => {
+  for(const index of [undefined,null,'invalid',-1,256]) {
+    const p=player(.5,{LOGGED_IN:true,SESSION_INDEX:index});
+    assert.equal(p.messages.find(m=>m.type==='session').auth_user,null);
+  }
+});
+
+test('reconnecting restores a paused song only after its seek settles', () => {
+  const p=player(.2);
+  p.command({op:'play',id:'Fixture0001',generation:1,position:90,revision:7,paused:true});
+  let state=p.tick();assert.equal(state.transition,true);assert.equal(state.seek_ack,0);
+  assert.equal(p.media.paused,true);
+  p.media.seeking=false;p.media.readyState=4;
+  state=p.tick();assert.equal(state.seek_ack,7);assert.equal(state.position,90);
+  assert.equal(state.transition,false);assert.equal(state.playing,false);
+  assert.equal(p.media.volume,.2);
+});
+
+
+test('a stale audio toggle cannot replace the selected song with another radio item', () => {
+  const p=player(.2);p.clock(32);
+  p.enableAudioSwitch('NOVA LANE - Glass harbor (Official Audio)');
+  p.command({op:'mode',video:false});p.tick();
+  assert.equal(p.id,'Fixture0001');
+  p.tick();p.media.seeking=false;p.media.readyState=4;
+  const state=p.tick(2000);
+  assert.equal(p.id,'Fixture0001');assert.equal(state.position,32);
+  assert.ok(state.title.includes('Night'));assert.equal(p.media.volume,.2);
+});
+
+test('the real audio counterpart is accepted when song titles match', () => {
+  const p=player();p.enableAudioSwitch('NOVA LANE - Night shift (Official Audio)');
+  p.command({op:'mode',video:false});p.tick();
+  assert.equal(p.id,'Fixture0002');
+  assert.equal(p.tick(2000).transition,false);
+});
+
+
+test('a paused unstarted player can finish an audio mode transition before restoring its seek', () => {
+  const p=player();p.media.pause();p.unstarted();
+  p.command({op:'pause'});
+  p.enableAudioSwitch('NOVA LANE - Night shift (Official Audio)');
+  p.command({op:'mode',video:false});
+  p.command({op:'seek',value:45,revision:9});
+  assert.equal(p.tick().transition,true);
+  p.tick(2000);p.media.seeking=false;p.media.readyState=4;
+  const state=p.tick();assert.equal(state.transition,false);assert.equal(state.seek_ack,9);
+  assert.equal(state.position,45);assert.equal(state.playing,false);
 });

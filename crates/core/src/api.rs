@@ -89,14 +89,28 @@ fn playlist_track(item: PlaylistItem) -> Option<Track> {
 
 impl Catalog {
     pub async fn new(cookie: Option<&str>) -> Result<Self> {
-        Self::bootstrap(cookie, None).await
+        Self::bootstrap(cookie, None, None).await
     }
     pub async fn from_session(session: &crate::session::SavedSession) -> Result<Self> {
-        Self::bootstrap(Some(&session.cookies), session.user_agent.as_deref()).await
+        Self::bootstrap(
+            Some(&session.cookies),
+            session.user_agent.as_deref(),
+            session.auth_user,
+        )
+        .await
     }
-    async fn bootstrap(cookie: Option<&str>, user_agent: Option<&str>) -> Result<Self> {
+    async fn bootstrap(
+        cookie: Option<&str>,
+        user_agent: Option<&str>,
+        auth_user: Option<u8>,
+    ) -> Result<Self> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(index) = auth_user {
+            headers.insert("X-Goog-AuthUser", index.to_string().parse()?);
+        }
         let http = reqwest::Client::builder()
             .http1_only()
+            .default_headers(headers)
             .user_agent(user_agent.unwrap_or(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0",
             ))
@@ -105,7 +119,7 @@ impl Catalog {
         // The library bootstrap appends an empty query string to the homepage.
         // Fetch the canonical URL directly and deserialize its documented tokens.
         let request = http
-            .get("https://music.youtube.com/")
+            .get(crate::session::music_url(auth_user))
             .header("Cookie", cookie.unwrap_or("SOCS=CAI"));
         let html = request.send().await?.error_for_status()?.text().await?;
         if cookie.is_some() && config_value::<bool>(&html, "LOGGED_IN").ok() == Some(false) {
