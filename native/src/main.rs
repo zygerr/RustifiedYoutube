@@ -1,12 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
+mod audio_loader;
 mod backend;
 mod icons;
 mod player;
+mod volume;
 
 fn main() -> eframe::Result {
-    if std::env::args().any(|arg| arg == "--smoke-audio") {
-        let result = smoke_audio();
+    if std::env::args().any(|arg| arg == "--smoke-audio" || arg == "--smoke-prefetch") {
+        let result = if std::env::args().any(|arg| arg == "--smoke-prefetch") {
+            smoke_prefetch()
+        } else {
+            smoke_audio()
+        };
         if let Err(error) = result {
             eprintln!("Native audio check failed: {error}");
             std::process::exit(1);
@@ -53,6 +59,79 @@ fn main() -> eframe::Result {
     );
     drop(instance);
     result
+}
+
+fn smoke_prefetch() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let loader = audio_loader::spawn(
+            rustified_core::session::load_cookie()?,
+            tx,
+            eframe::egui::Context::default(),
+        );
+        let first = "Fixture0001";
+        let next = "Vnx_DyrYdeM";
+        let started = std::time::Instant::now();
+        loader.send(audio_loader::Request::Prefetch(Some(first.into())))?;
+        loader.send(audio_loader::Request::Play(1, first.into()))?;
+        loader.send(audio_loader::Request::Prefetch(Some(next.into())))?;
+        let deadline = started + std::time::Duration::from_secs(180);
+        let mut cold = None;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(backend::Response::Stream(1, result)) => {
+                    cold = Some(result?);
+                    println!("Cold preparation: {:.2}s", started.elapsed().as_secs_f64());
+                }
+                Ok(backend::Response::Preloaded(id)) if id == next => break,
+                _ => {}
+            }
+        }
+        if cold.is_none() {
+            return Err(std::io::Error::other("Cold preparation did not finish").into());
+        }
+        for (id, video) in [(2, next), (3, first)] {
+            let ready = std::time::Instant::now();
+            loader.send(audio_loader::Request::Play(id, video.into()))?;
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_secs(2))? {
+                    backend::Response::Stream(request, result) if request == id => {
+                        let audio = result?;
+                        if ready.elapsed() > std::time::Duration::from_millis(500) {
+                            return Err(
+                                std::io::Error::other("Cached playback was too slow").into()
+                            );
+                        }
+                        if !std::path::Path::new(
+                            &reqwest::Url::parse(&audio.url)?
+                                .to_file_path()
+                                .map_err(|_| std::io::Error::other("Invalid cached audio"))?,
+                        )
+                        .is_file()
+                        {
+                            return Err(std::io::Error::other("Cached audio disappeared").into());
+                        }
+                        println!(
+                            "{}: {:.2}ms",
+                            if id == 2 {
+                                "Prefetched next track"
+                            } else {
+                                "Replay previous track"
+                            },
+                            ready.elapsed().as_secs_f64() * 1000.0
+                        );
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })
 }
 
 fn smoke_audio() -> Result<(), Box<dyn std::error::Error>> {

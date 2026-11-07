@@ -33,6 +33,7 @@ struct Preferences {
     volume: Option<f32>,
     recent: Vec<Track>,
     close_to_tray: Option<bool>,
+    volume_scroll_step: Option<u8>,
 }
 
 enum TrayAction {
@@ -65,6 +66,7 @@ pub struct MusicApp {
     list_request: u64,
     play_request: u64,
     volume: f32,
+    volume_wheel: crate::volume::Wheel,
     repeat: bool,
     preferences: Preferences,
     textures: HashMap<String, egui::TextureHandle>,
@@ -130,6 +132,7 @@ impl MusicApp {
             list_request: 0,
             play_request: 0,
             volume,
+            volume_wheel: crate::volume::Wheel::default(),
             repeat: false,
             preferences,
             textures: HashMap::new(),
@@ -241,6 +244,7 @@ impl MusicApp {
         self.player.send(PlayerCommand::Stop);
         self.backend
             .send(Request::Resolve(self.play_request, track.id.clone()));
+        self.prefetch_next();
         self.preferences.recent.retain(|item| item.id != track.id);
         self.preferences.recent.insert(0, track);
         self.preferences.recent.truncate(30);
@@ -254,6 +258,21 @@ impl MusicApp {
                 self.play_at(0);
             }
         }
+    }
+
+    fn prefetch_next(&self) {
+        let next = self
+            .current
+            .and_then(|index| self.queue.get(index + 1))
+            .or_else(|| {
+                if self.repeat {
+                    self.queue.first()
+                } else {
+                    None
+                }
+            });
+        self.backend
+            .send(Request::Prefetch(next.map(|track| track.id.clone())));
     }
     fn previous(&mut self) {
         if self.state.position > 3. {
@@ -594,7 +613,7 @@ impl MusicApp {
                         },
                     );
                     ui.allocate_ui_with_layout(
-                        Vec2::new((ui.available_width() - 190.).max(260.), 78.),
+                        Vec2::new((ui.available_width() - 240.).max(260.), 78.),
                         Layout::top_down(Align::Center),
                         |ui| {
                             ui.horizontal(|ui| {
@@ -634,6 +653,7 @@ impl MusicApp {
                                     icons::button(ui, Icon::Repeat, "Repeat queue", 30., false);
                                 if response.clicked() {
                                     self.repeat = !self.repeat;
+                                    self.prefetch_next();
                                 }
                                 if self.repeat {
                                     ui.painter().circle_filled(
@@ -686,13 +706,11 @@ impl MusicApp {
                         if icons::button(ui, Icon::Queue, "Open play queue", 32., false).clicked() {
                             self.page = Page::Queue;
                         }
-                        if ui
-                            .add_sized(
-                                [95., 22.],
-                                egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false),
-                            )
-                            .changed()
-                        {
+                        if self.volume_wheel.control(
+                            ui,
+                            &mut self.volume,
+                            self.preferences.volume_scroll_step.unwrap_or(5),
+                        ) {
                             self.player.send(PlayerCommand::Volume(self.volume as f64));
                         }
                         icons::draw(
@@ -808,6 +826,7 @@ impl MusicApp {
                                         .clicked()
                                     {
                                         self.queue.push(track.clone());
+                                        self.prefetch_next();
                                     }
                                     let heart = icons::button(
                                         ui,
@@ -930,6 +949,20 @@ impl MusicApp {
         ui.add_space(28.);
         ui.heading("Playback");
         ui.label("Audio output: Windows default device");
+        let mut step = self
+            .preferences
+            .volume_scroll_step
+            .unwrap_or(5)
+            .clamp(1, 100);
+        ui.horizontal(|ui| {
+            ui.label("Volume step per scroll notch");
+            if ui
+                .add(egui::DragValue::new(&mut step).range(1..=100).suffix(" %"))
+                .changed()
+            {
+                self.preferences.volume_scroll_step = Some(step);
+            }
+        });
         let mut close_to_tray = self.preferences.close_to_tray.unwrap_or(true);
         if ui
             .checkbox(

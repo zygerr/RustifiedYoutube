@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+- Reduce audio extraction requests, with fallback to the compatible extraction path when needed.
+- Preload the next queued track and reuse up to three recent prepared tracks within a 160 MB temporary cache.
+- Prioritize a selected track over unrelated prefetch work and reuse an in-progress preload when that track is selected.
+- Add volume adjustment by mouse wheel while hovering the volume control, with the exact step configurable from 1% to 100% in Settings (default 5%).
+- Show the current volume percentage and persist the scroll-step setting.
+
 ## 0.2.1
 
 - Repair fragmented M4A containers before Windows playback, fixing tracks that immediately jumped to EOF and skipped.

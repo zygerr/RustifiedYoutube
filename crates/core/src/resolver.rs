@@ -1,11 +1,13 @@
 use crate::{model::valid_video_id, session};
 use anyhow::{Context, Result};
-use std::{io::Write, process::Stdio, time::Duration};
+use std::{io::Write, process::Stdio, sync::Arc, time::Duration};
 use tokio::process::Command;
 
+#[derive(Clone)]
 pub struct PreparedAudio {
     pub url: String,
-    _file: tempfile::TempPath,
+    pub bytes: u64,
+    _file: Arc<tempfile::TempPath>,
 }
 
 pub async fn prepare(id: &str, cookie: Option<&str>) -> Result<PreparedAudio> {
@@ -59,6 +61,14 @@ pub async fn prepare_with_status(
     } else {
         None
     };
+    let fallback_args: Vec<_> = command
+        .as_std()
+        .get_args()
+        .map(std::ffi::OsString::from)
+        .collect();
+    command
+        .arg("--extractor-args")
+        .arg("youtube:skip=hls,dash;player_skip=initial_data");
     command
         .arg("--")
         .arg(format!("https://music.youtube.com/watch?v={id}"));
@@ -69,10 +79,27 @@ pub async fn prepare_with_status(
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000);
-    let output = tokio::time::timeout(Duration::from_secs(120), command.output())
+    let mut output = tokio::time::timeout(Duration::from_secs(60), command.output())
         .await
         .context("YouTube took too long to prepare this track")?
         .context("The playback helper is missing. Reinstall RustifiedYoutube")?;
+    if !output.status.success() {
+        status("Trying the compatible audio source…");
+        let mut fallback = Command::new(session::adjacent_tool("yt-dlp.exe"));
+        fallback
+            .args(fallback_args)
+            .arg("--")
+            .arg(format!("https://music.youtube.com/watch?v={id}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        fallback.creation_flags(0x08000000);
+        output = tokio::time::timeout(Duration::from_secs(60), fallback.output())
+            .await
+            .context("YouTube took too long to prepare this track")??;
+    }
     drop(cookie_file);
     anyhow::ensure!(
         output.status.success() && std::fs::metadata(&file)?.len() > 1024,
@@ -117,7 +144,12 @@ pub async fn prepare_with_status(
     let url = reqwest::Url::from_file_path(&fixed)
         .map_err(|_| anyhow::anyhow!("Invalid audio buffer path"))?
         .to_string();
-    Ok(PreparedAudio { url, _file: fixed })
+    let bytes = std::fs::metadata(&fixed)?.len();
+    Ok(PreparedAudio {
+        url,
+        bytes,
+        _file: Arc::new(fixed),
+    })
 }
 
 fn netscape_cookie(cookie: &str) -> String {

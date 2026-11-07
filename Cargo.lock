@@ -3927,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "rustified-auth"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rustified-core",
  "tao",
@@ -3938,7 +3938,7 @@ dependencies = [
 
 [[package]]
 name = "rustified-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3955,7 +3955,7 @@ dependencies = [
 
 [[package]]
 name = "rustified-youtube-native"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "eframe",
  "image",

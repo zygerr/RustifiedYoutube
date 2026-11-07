@@ -8,11 +8,12 @@ An unofficial YouTube Music desktop client for Windows x64. Version 0.2 uses a n
 - Connect your Google account to open playlists and liked songs, and like/unlike tracks.
 - Play, pause, seek, change volume, use previous/next, repeat the queue, and add songs to the queue.
 - Keep playing in the system tray, reopen the existing window, and save volume preferences.
+- Preload the next queued track and reuse recently prepared tracks for faster switching.
 - Find the build version in the sidebar, Settings, About, and tray tooltip.
 
 The main window contains no HTML, JavaScript frontend, or WebView. A separate WebView2 helper opens temporarily for Google sign-in, then exits. Playback preparation uses bundled yt-dlp, Node.js, and FFmpeg helper processes; the application is not composed exclusively of Rust binaries. FFmpeg remuxes fragmented M4A into a standard MP4 container for reliable Windows playback, without re-encoding. Google authentication and the unofficial YouTube API can change independently of the application.
 
-Tracks are prepared in temporary audio buffers before native playback starts, so selecting a track can take several seconds depending on YouTube and the network. Buffers are removed when their owner is released normally. A forced process termination can leave temporary files under the app's `audio-buffer` directory. There is no offline library or automatic updater.
+Tracks are prepared in temporary audio buffers before native playback starts, so the first selection can take several seconds depending on YouTube and the network. The next queued track is prepared in the background. Up to three recent prepared tracks are cached during the session, within a 160 MB cache limit; the currently playing track stays available even if evicted from that cache. Selecting another song takes priority over unrelated preloading. Account changes clear the cache. Buffers are removed after their final owner releases them normally. A forced process termination can leave temporary files under the app's `audio-buffer` directory. There is no offline library or automatic updater.
 
 ## Running locally
 
@@ -31,6 +32,8 @@ Choose **Connect Google** to sign in. The helper reuses only this app's existing
 
 Use the player bar or the tray menu. While the window is focused, `Ctrl+Alt+Space` toggles playback and `Ctrl+Q` exits. Closing the window keeps playback in the tray by default; change that behavior in Settings. Click the tray icon to show the window again. `Ctrl+R` has no browser reload action in the native client.
 
+Scroll up/down over the volume slider or percentage to increase/decrease volume. In **Settings → Playback → Volume step per scroll notch**, choose any integer from **1% to 100%**; the default is 5%. Volume stays within 0–100%, and the selected step is saved across launches.
+
 ## Build and checks
 
 ```powershell
@@ -47,6 +50,7 @@ Optional live checks (these contact YouTube):
 ```powershell
 cargo run -p rustified-core --example smoke -- --authenticated
 ./target/debug/RustifiedYoutube.exe --smoke-audio
+./target/debug/RustifiedYoutube.exe --smoke-prefetch
 ```
 
 The second check prepares a public track and confirms that native playback advances with volume set to zero. Unit tests do not require a Google account.
