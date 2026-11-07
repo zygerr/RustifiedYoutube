@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.11
+
+- Supply the Windows volume mixer with a standalone application ICO in persistent app data, avoiding executable resource locators that some mixer surfaces fail to display.
+- Verify that Windows can load both large and small icons from that exact file during the mixer smoke check; retain the executable resource as a fallback if the ICO cannot be written.
+
 ## 0.3.10
 
 - Label this player's Windows audio sessions as RustifiedYoutube and use the application's embedded icon in the volume mixer.

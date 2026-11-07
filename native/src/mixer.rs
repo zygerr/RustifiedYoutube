@@ -130,30 +130,55 @@ pub struct Mixer {
     verified_sessions: Arc<AtomicUsize>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
+
+fn icon_path() -> Option<std::path::PathBuf> {
+    // Some Windows mixer surfaces accept the session name but fail to load
+    // executable resource locators. Give them an actual ICO file instead.
+    // Keep it in app data so installs, portable moves and upgrades don't leave
+    // the audio service pointing at a removed executable or temporary file.
+    let directory = rustified_core::session::app_dir().ok()?;
+    let path = directory.join("mixer-icon-v1.ico");
+    let bytes = include_bytes!("../../assets/icon.ico");
+    if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
+        std::fs::write(&path, bytes).ok()?;
+    }
+    Some(path)
+}
+
 impl Mixer {
     pub fn start() -> Option<Self> {
         let exe = std::env::current_exe().ok()?;
-        // Explicit resource ID shared with native/build.rs. Avoid -1, which
-        // ExtractIconEx reserves for querying the number of icons.
-        let icon = format!("{},-101", exe.display());
+        let standalone = icon_path();
+        let source = standalone.as_deref().unwrap_or(&exe);
+        // Preserve session branding even if the app-data icon cannot be written.
+        let icon = standalone.as_ref().map_or_else(
+            || format!("{},-101", exe.display()),
+            |path| path.to_string_lossy().into_owned(),
+        );
         let mut native_icon = windows::Win32::UI::WindowsAndMessaging::HICON::default();
+        let mut small_icon = windows::Win32::UI::WindowsAndMessaging::HICON::default();
         let loaded = unsafe {
             windows::Win32::UI::Shell::ExtractIconExW(
-                &HSTRING::from(exe.to_string_lossy().as_ref()),
-                -101,
+                &HSTRING::from(source.to_string_lossy().as_ref()),
+                if standalone.is_some() { 0 } else { -101 },
                 Some(&mut native_icon),
-                None,
+                Some(&mut small_icon),
                 1,
             )
         };
-        let icon_valid = loaded == 1 && !native_icon.is_invalid();
-        if !native_icon.is_invalid() {
-            unsafe {
-                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(native_icon);
+        let icon_valid = loaded > 0 && !native_icon.is_invalid() && !small_icon.is_invalid();
+        for handle in [native_icon, small_icon] {
+            if !handle.is_invalid() {
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(handle);
+                }
             }
         }
         if smoke_active() {
-            println!("Application icon resource available: {icon_valid}");
+            println!(
+                "Application icon available: {icon_valid}; standalone ICO: {}",
+                standalone.is_some()
+            );
         }
         let (tx, rx) = mpsc::channel();
         let verified_sessions = Arc::new(AtomicUsize::new(0));

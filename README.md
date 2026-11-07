@@ -91,7 +91,7 @@ The streaming check opens a temporary app instance with volume zero, measures tw
 
 If YouTube ignores a track selection, the player retries once using that exact watch URL. After detecting a broken SPA router, subsequent selections use direct watch navigation for the current app session. Recovery preserves the native queue and account selection; the error banner also offers **Retry playback** and **Google sign-in**. A navigation failure alone is not treated as a Google logout.
 
-The mixer check starts muted playback, verifies the native audio-session name and icon path, confirms the embedded application icon can be loaded, and checks that labeling leaves mixer volume and mute unchanged. Ownership tests reject unrelated WebView2 browsers, missing process entries, and cyclic process trees.
+The mixer uses a standalone ICO in persistent app data, with an executable resource fallback. The mixer check starts muted playback, verifies the native audio-session name and icon path, confirms Windows can load both small and large icons from that source, and checks that labeling leaves mixer volume and mute unchanged. This checks the native metadata and icon loader; it does not verify the mixer UI visually. Ownership tests reject unrelated WebView2 browsers, missing process entries, and cyclic process trees.
 
 The taskbar check waits for the real Windows thumbnail toolbar, minimizes its muted test window, and sends native thumbnail-click notifications to that window. It verifies pause/resume, Previous/Next, icon-state updates, and disabled Next at the end of the queue. It uses the normal playback and queue handlers.
 
