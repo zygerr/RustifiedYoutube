@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.8
+
+- Recover ignored or stalled YouTube Music navigation automatically using the exact requested watch URL, with one bounded recovery attempt per track.
+- Use direct watch navigation for subsequent selections after detecting a broken SPA router, retaining the native queue and Google account selection.
+- Distinguish a stalled navigation from an explicit Google sign-in requirement and avoid using another track's stale response to diagnose the account.
+- Complete Google login inside the playback WebView, preserving its persistent profile and restoring the selected track, position, pause state, volume, and mode.
+- Allow the official Google/YouTube authentication handoffs and handle account popups in that same WebView. Keep IPC restricted to the exact Music origin.
+- Add Retry playback and Google sign-in actions to errors, plus regression checks for failed navigation, stale responses, direct reloads, and trusted account URLs.
+
 ## 0.3.7
 
 - Add three native appearance themes in Settings: Classic, Purple Haze, and OLED, with clickable palette previews.

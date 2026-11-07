@@ -32,13 +32,13 @@ cargo build --workspace --locked
 cargo run -p rustified-youtube-native --locked
 ```
 
-Choose **Continue with Google** to connect. The app first reuses the account already saved in its own WebView2 profile; a Google window opens only when interactive sign-in is necessary. Complete any Google challenges yourself. **Settings → Account** shows the actual playback login separately from the library connection. **Refresh connection** rechecks an authenticated profile without reloading playback; **Reconnect playback account** opens Google sign-in when the media page is signed out. Completing interactive login reloads the media page and restores the selected track, position, pause state, volume, and Audio/Video mode.
+Choose **Continue with Google** to connect. Google sign-in is displayed inside the very same WebView used for playback, backed by the app's persistent profile. Complete any Google challenges yourself. **Settings → Account** shows the playback login separately from the native library connection. **Refresh connection** synchronizes a working profile without interrupting playback; **Open Google sign-in** opens the in-app login flow. Returning from Google restores the selected track, position, pause state, volume, and Audio/Video mode.
 
 The native library session is synchronized from the browser at startup and every five minutes. Rejected authenticated requests trigger a coordinated refresh and one retry. Temporary connection or server errors keep the saved account, and public search remains available if Google requires a new sign-in. Google can still expire or revoke a login; the client cannot prevent that.
 
 A saved library credential does not prove that playback is authenticated. When an account is saved, playback waits for the media page to confirm sign-in; a signed-out player offers reconnection instead of silently starting as a guest. Use the Google account with the Premium subscription for its playback benefits.
 
-The player and temporary sign-in window reuse only this application's existing dedicated WebView2 profile. Search can also work without connecting an account; playback remains subject to YouTube's availability, account requirements, and normal advertisements. Popup navigation is disabled in the media surface; use the separate sign-in window for authentication.
+Login and playback reuse this application's dedicated WebView2 profile and the same browser instance. Search can also work without connecting an account; playback remains subject to YouTube's availability, account requirements, and normal advertisements. Only official HTTPS Music and Google/YouTube account handoffs are allowed; approved account popups continue in the same WebView. IPC is accepted only from the exact Music origin.
 
 ## Controls
 
@@ -66,7 +66,7 @@ node --test native/tests/media_bridge.cjs
 ./scripts/build-native.ps1
 ```
 
-The per-user installer, portable ZIP, and SHA-256 checksums are written to `dist/<version>/`. Extract the whole portable ZIP before launching `RustifiedYoutube.exe`; its adjacent sign-in helper is required. Builds are currently unsigned. The packaging script downloads only a pinned, checksum-verified NSIS build tool.
+The per-user installer, portable ZIP, and SHA-256 checksums are written to `dist/<version>/`. Extract the whole portable ZIP before launching `RustifiedYoutube.exe`. Sign-in is integrated; the bundled legacy `rustified-auth.exe` is retained as a standalone recovery tool. Builds are currently unsigned. The packaging script downloads only a pinned, checksum-verified NSIS build tool.
 
 Node.js 24 is used only to run the media bridge regression tests during development and CI; it is not required or bundled for playback.
 
@@ -78,16 +78,22 @@ cargo run -p rustified-core --example smoke -- --authenticated
 ./target/debug/RustifiedYoutube.exe --smoke-rpc
 ./target/debug/RustifiedYoutube.exe --smoke-account
 ./target/debug/RustifiedYoutube.exe --smoke-player-session
+./target/debug/RustifiedYoutube.exe --smoke-login
+./target/debug/RustifiedYoutube.exe --smoke-stream --smoke-recovery --smoke-login-rebind
 ./target/debug/RustifiedYoutube.exe --smoke-artwork
 ```
 
 The streaming check opens a temporary app instance with volume zero, measures two real streams, verifies video dimensions, pause, seek confirmation, and Audio/Video switching, then closes. It does not change saved UI preferences. Unit tests cover full title and history parsing, artist ranking, styled-title glyph coverage, volume wheel interaction, seek interaction and width, shuffle order, and media bridge restrictions.
+
+If YouTube ignores a track selection, the player retries once using that exact watch URL. After detecting a broken SPA router, subsequent selections use direct watch navigation for the current app session. Recovery preserves the native queue and account selection; the error banner also offers **Retry playback** and **Google sign-in**. A navigation failure alone is not treated as a Google logout.
 
 The RPC check verifies the real Discord handshake and acknowledgement of a clear-activity command without displaying a test song. Unit tests also cover presence timestamps, pause/ad clearing, Unicode limits, fragmented IPC frames, pings, and immediate volume protection.
 
 The player-session check verifies Google sign-in in the actual playback document and fails when it is anonymous. The account check requires this same browser authentication, restores the current profile, reads library/history counts without logging their names, refreshes the connection, and exits. It never opens an interactive Google login, starts music, publishes Discord presence, or changes saved UI preferences. Running it again checks restoration across app restarts. The streaming check also refreshes an existing account during playback and verifies that the current track and position are preserved.
 
 UI snapshots accept `--theme purple` or `--theme oled` alongside `--ui-snapshot <page>` and optional `--compact`; they use fixture data and do not access your account.
+
+The login check opens the official Google sign-in flow inside the playback WebView and verifies the return to an authenticated player and library. It may require you to complete Google sign-in. The combined recovery/rebind check deliberately ignores the first SPA selection, verifies automatic direct-watch recovery, then verifies paused-position restoration through Google sign-in and queue advancement. Both use no saved UI preferences or Discord presence; the streaming check stays muted.
 
 The artwork check fetches public album/video images, verifies that the expanded images retain more resolution than browsing images, and prints dimensions only. Unit tests cover high-resolution source selection, URL fallbacks, bounded decoding, and artwork wheel behavior alongside the volume slider.
 
@@ -110,4 +116,4 @@ The dedicated Google/WebView2 profile remains at `%LOCALAPPDATA%\io.github.zyger
 
 **Disconnect native session** removes the encrypted metadata API session and writes `session.disabled` to stop automatic native reconnection. It does not sign out the separate Google/WebView2 profile. **Continue with Google** enables reconnection and can restore that account. Uninstalling preserves user data. UI preferences are stored in eframe's per-user application directory. Old `audio-buffer` files from earlier versions are not used by version 0.3.
 
-The streaming architecture was researched against [ytmdesktop's integration with the official player](https://github.com/ytmdesktop/ytmdesktop/blob/development/src/renderer/ytmview/preload.ts). RustifiedYoutube has its own Rust interface and media adapter. This project is independent and is not affiliated with Google or YouTube.
+The streaming architecture was researched against [ytmdesktop's integration with the official player](https://github.com/ytmdesktop/ytmdesktop/blob/development/src/renderer/ytmview/preload.ts). The in-app login follows the persistent browser-session pattern in [YTMDesktop's YTMViewManager](https://github.com/ytmdesktop/ytmdesktop/blob/d489670733dbd4af83420e802a069f64481aebc5/src/main/services/ytmviewmanager/index.ts). RustifiedYoutube has its own Rust interface and media adapter. This project is independent and is not affiliated with Google or YouTube.

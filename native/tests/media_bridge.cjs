@@ -22,10 +22,11 @@ function player(initialVolume = .5, identity = {}, autoplay = true) {
     play() {playedVolumes.push(this.volume);emit('play',this);this.paused=false;return Promise.resolve();}
   }
   let media = new MockMedia(), apiVolume = 100;
-  let acceptSeek = true,unstarted=false;
+  let acceptSeek = true,unstarted=false,acceptNavigation=true,navigations=0,playability='OK',advertisement=false;
   const api = {
     getVideoElement: () => media, getVideoData: () => ({video_id: id,title}),
     getCurrentTime: () => clock, getDuration: () => 200,
+    getPlayerResponse:()=>({playabilityStatus:{status:playability}}),
     getPlayerState: () => unstarted ? -1 : media.paused ? 2 : 1,
     getVolume: () => apiVolume, setVolume(value) {apiVolume=value;media.volume=value/100;},
     isMuted: () => media.muted, mute() {media.muted=true;}, unMute() {media.muted=false;},
@@ -47,8 +48,8 @@ function player(initialVolume = .5, identity = {}, autoplay = true) {
       if (selector === 'ytmusic-av-toggle .song-button') return songButton;
       return null;
     },
-    getElementById: () => ({classList: {contains: () => false}}),
-    dispatchEvent(event) {id = event.detail.endpoint.watchEndpoint.videoId;if(id==='Fixture0001')title='NOVA LANE - Night shift (Official Video)';}
+    getElementById: () => ({classList: {contains: () => advertisement}}),
+    dispatchEvent(event) {navigations++;if(!acceptNavigation)return;id = event.detail.endpoint.watchEndpoint.videoId;if(id==='Fixture0001')title='NOVA LANE - Night shift (Official Video)';}
   };
   const context = vm.createContext({
     document, location: {origin: 'https://music.youtube.com'},
@@ -70,6 +71,10 @@ function player(initialVolume = .5, identity = {}, autoplay = true) {
     replaceMedia() {media=new MockMedia();return media;},
     resetYouTubeVolume(value) {apiVolume=value*100;media.volume=value;},
     unstarted() {unstarted=true;},
+    rejectNavigation(){acceptNavigation=false;},
+    status(value){playability=value;},
+    advert(value){advertisement=value;},
+    get navigations(){return navigations;},
     enableAudioSwitch(nextTitle) {songButton={disabled:false,getAttribute:()=>null,hasAttribute:()=>false,click(){id='Fixture0002';title=nextTitle;clock=media.currentTime=0;}};},
     get id(){return id;},
     rejectSeek() {acceptSeek = false;},
@@ -209,4 +214,39 @@ test('a paused unstarted player can finish an audio mode transition before resto
   p.tick(2000);p.media.seeking=false;p.media.readyState=4;
   const state=p.tick();assert.equal(state.transition,false);assert.equal(state.seek_ack,9);
   assert.equal(state.position,45);assert.equal(state.playing,false);
+});
+
+
+test('ignored SPA navigation requests one recovery without accusing the account of being signed out',()=>{
+  const p=player();p.rejectNavigation();
+  p.command({op:'play',id:'Fixture0002',generation:2});p.tick(5000);p.tick(5000);
+  const stalls=p.messages.filter(m=>m.type==='stalled');
+  assert.equal(stalls.length,1);assert.equal(stalls[0].video_id,'Fixture0002');
+  assert.equal(stalls[0].generation,2);assert.equal(stalls[0].status,'NAVIGATION_STALLED');
+  assert.ok(stalls[0].document_id);
+  assert.equal(p.media.paused,true);
+});
+
+test('a direct watch reload does not dispatch the failed SPA navigation again',()=>{
+  const p=player();const count=p.navigations;
+  p.command({op:'play',id:'Fixture0001',generation:2,direct:true,paused:true});
+  p.tick();assert.equal(p.navigations,count);
+});
+
+test('only an explicit server login requirement requests account reconnection',()=>{
+  const p=player();p.status('LOGIN_REQUIRED');p.tick(1200);
+  assert.equal(p.messages.filter(m=>m.type==='stalled').at(-1).status,'LOGIN_REQUIRED');
+});
+
+test('an advertisement is never treated as stalled song navigation',()=>{
+  const p=player();p.advert(true);p.rejectNavigation();
+  p.command({op:'play',id:'Fixture0002',generation:2});p.tick(20000);
+  assert.equal(p.messages.filter(m=>m.type==='stalled').length,0);
+});
+
+
+test('an old track login response cannot mark a new requested track as signed out',()=>{
+  const p=player();p.rejectNavigation();p.status('LOGIN_REQUIRED');
+  p.command({op:'play',id:'Fixture0002',generation:2});p.tick(5000);
+  assert.equal(p.messages.filter(m=>m.type==='stalled').at(-1).status,'NAVIGATION_STALLED');
 });

@@ -207,7 +207,11 @@ impl MusicApp {
             snapshot: crate::preview::Snapshot::new(),
             account_check: crate::account::smoke_active().then(|| AccountCheck {
                 started: std::time::Instant::now(),
-                phase: 0,
+                phase: if std::env::args().any(|arg| arg == "--smoke-login") {
+                    10
+                } else {
+                    0
+                },
             }),
         };
         app.prepare_snapshot(ctx);
@@ -421,6 +425,13 @@ impl MusicApp {
 
     fn receive(&mut self, ctx: &egui::Context) {
         self.player.pump();
+        if self.player.take_login_completed() {
+            self.error = None;
+            self.connecting = rustified_core::session::native_enabled();
+            if self.connecting {
+                self.backend.send(Request::Connect { force_login: false });
+            }
+        }
         while let Ok(capture) = self.player.session_rx.try_recv() {
             self.backend.send(Request::Captured(capture));
         }
@@ -457,10 +468,21 @@ impl MusicApp {
                 }
                 Response::CaptureSession(id) => self.player.capture_session(id),
                 Response::AccountStatus(status) => self.account_status = status,
-                Response::ConnectFinished { browser_login } => {
-                    self.connecting = false;
-                    if browser_login {
-                        self.player.reconnect();
+                Response::OpenSignIn => {
+                    if crate::account::smoke_active()
+                        && !std::env::args().any(|arg| arg == "--smoke-login")
+                    {
+                        crate::STREAM_CHECK_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+                        self.quit = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    } else {
+                        self.error = None;
+                        self.player.begin_login();
+                    }
+                }
+                Response::ConnectFinished => {
+                    if !self.player.login_open() {
+                        self.connecting = false;
                     }
                 }
                 Response::Tracks(id, result) if id == self.list_request => {
@@ -583,6 +605,9 @@ impl MusicApp {
                     }
                 }
             }
+            if state.playing && self.state.error.is_some() {
+                self.error = None;
+            }
             if let Some(error) = &state.error {
                 self.error = Some(error.clone());
             }
@@ -595,7 +620,7 @@ impl MusicApp {
             self.error =
                 Some("YouTube couldn't confirm the seek position. Try seeking again.".into());
         }
-        if self.player.needs_login() {
+        if self.player.needs_login() || self.player.login_open() {
             self.state.playing = false;
             self.state.buffering = false;
         }
@@ -1517,10 +1542,15 @@ impl MusicApp {
                 println!(
                     "Pause and seek verified; reloading the playback document to verify login rebinding"
                 );
-                self.player.reconnect();
+                if std::env::args().any(|arg| arg == "--smoke-login-rebind") {
+                    self.player.begin_login();
+                } else {
+                    self.player.reconnect();
+                }
                 check.stage = 7;
             }
             7 if self.player.is_ready()
+                && !self.connecting
                 && self.player.authenticated() == Some(true)
                 && !self.player.is_restoring()
                 && !self.state.playing
@@ -1618,6 +1648,26 @@ impl MusicApp {
         if check.phase == 2 {
             return;
         }
+        if check.phase == 10 && self.player.is_ready() {
+            self.connecting = true;
+            self.backend.send(Request::Connect { force_login: true });
+            check.phase = 11;
+        }
+        if check.phase == 11
+            && !self.player.login_open()
+            && self.player.authenticated() == Some(true)
+            && !self.connecting
+            && self.library_loaded
+            && !self.history_loading
+        {
+            println!(
+                "Google sign-in returned to the same playback WebView; library and playback authenticated"
+            );
+            self.quit = true;
+            check.phase = 2;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         if check.started.elapsed() > Duration::from_secs(75)
             || self.account_status.starts_with("Google requires sign-in")
         {
@@ -1627,7 +1677,8 @@ impl MusicApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if self.connected
+        if check.phase < 10
+            && self.connected
             && self.player.authenticated() == Some(true)
             && self.library_loaded
             && !self.history_loading
@@ -1833,6 +1884,46 @@ impl MusicApp {
             });
         }
     }
+    fn login_ui(&mut self, ctx: &egui::Context) -> Option<egui::Rect> {
+        if !self.player.login_open() {
+            return None;
+        }
+        let available = ctx.content_rect();
+        let size = Vec2::new(
+            (available.width() - 60.).min(960.),
+            (available.height() - 60.).min(740.),
+        );
+        let mut open = true;
+        let mut cancel = false;
+        let mut browser_rect = None;
+        egui::Window::new("Continue with Google")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_pos(available.center() - size * 0.5)
+            .fixed_size(size)
+            .show(ctx, |ui| {
+                ui.label(
+                    "Sign in to the Google account that has your YouTube Premium subscription.",
+                );
+                ui.add_space(6.);
+                if ui.button("Cancel sign-in").clicked() {
+                    cancel = true;
+                }
+                ui.add_space(6.);
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(size.x - 24., (size.y - 110.).max(240.)),
+                    Sense::hover(),
+                );
+                browser_rect = Some(rect);
+            });
+        if !open || cancel {
+            self.player.cancel_login();
+            self.connecting = false;
+            return None;
+        }
+        browser_rect
+    }
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let colors = crate::theme::palette(ui.ctx());
         ui.add_space(15.);
@@ -1862,7 +1953,13 @@ impl MusicApp {
             Some(false) => "Playback account: guest",
             None => "Playback account: checking…",
         });
-        ui.label(RichText::new("Your saved account is restored automatically. Google sign-in opens only when needed.").small().color(colors.muted));
+        ui.label(
+            RichText::new(
+                "Your account is saved on this device. Reconnect here if Google requests sign-in.",
+            )
+            .small()
+            .color(colors.muted),
+        );
         if ui
             .add_enabled(
                 !self.connecting,
@@ -1885,9 +1982,19 @@ impl MusicApp {
                 force_login: self.player.authenticated() != Some(true),
             });
         }
+        if ui
+            .add_enabled(!self.connecting, egui::Button::new("Open Google sign-in"))
+            .clicked()
+        {
+            self.connecting = true;
+            self.backend.send(Request::Connect { force_login: true });
+        }
         if (self.connected || self.player.needs_login())
             && ui.button("Disconnect native session").clicked()
         {
+            if self.player.login_open() {
+                self.player.cancel_login();
+            }
             self.backend.send(Request::Disconnect);
             self.connecting = false;
             self.playlists.clear();
@@ -2043,6 +2150,15 @@ impl eframe::App for MusicApp {
                         .show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(message);
+                                if self.now.is_some() && ui.small_button("Retry playback").clicked()
+                                {
+                                    self.error = None;
+                                    self.player.reconnect();
+                                }
+                                if ui.small_button("Google sign-in").clicked() {
+                                    self.connecting = true;
+                                    self.backend.send(Request::Connect { force_login: true });
+                                }
                                 if ui.small_button("Dismiss").clicked() {
                                     self.error = None;
                                 }
@@ -2087,8 +2203,15 @@ impl eframe::App for MusicApp {
         if self.connecting {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
+        let login_rect = self.login_ui(ctx);
         self.player.place_video(
-            if self.about { None } else { self.video_rect },
+            if self.player.login_open() {
+                login_rect
+            } else if self.about {
+                None
+            } else {
+                self.video_rect
+            },
             ctx.pixels_per_point(),
         );
         if self.stream_check.is_some() {

@@ -37,6 +37,20 @@ pub struct PlayerState {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BridgeEvent {
+    #[serde(skip_deserializing)]
+    Navigation {
+        destination: crate::navigation::Destination,
+    },
+    #[serde(skip_deserializing)]
+    Popup {
+        url: String,
+    },
+    Stalled {
+        document_id: String,
+        generation: u64,
+        video_id: String,
+        status: String,
+    },
     Ready {
         document_id: String,
     },
@@ -95,8 +109,7 @@ enum TracePhase {
 }
 
 fn playback_origin(uri: &str) -> bool {
-    reqwest::Url::parse(uri)
-        .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("music.youtube.com"))
+    crate::navigation::destination(uri) == Some(crate::navigation::Destination::Music)
 }
 
 pub struct Player {
@@ -108,6 +121,7 @@ pub struct Player {
     ready: Cell<bool>,
     generation: Cell<u64>,
     requested: Cell<Option<Instant>>,
+    loading_since: Cell<Option<Instant>>,
     volume: Cell<f64>,
     video: Cell<bool>,
     last_bounds: Cell<Option<[i32; 4]>>,
@@ -123,6 +137,12 @@ pub struct Player {
     resume: RefCell<Option<Value>>,
     restoring: Cell<bool>,
     waiting_restore: Cell<bool>,
+    login_open: Cell<bool>,
+    login_completed: Cell<bool>,
+    suppress_login: Cell<bool>,
+    recovered: Cell<bool>,
+    prefer_direct: Cell<bool>,
+    last_state: RefCell<PlayerState>,
 }
 impl Player {
     pub fn start(cc: &eframe::CreationContext<'_>, volume: f64) -> Self {
@@ -138,6 +158,7 @@ impl Player {
             ready: Cell::new(false),
             generation: Cell::new(0),
             requested: Cell::new(None),
+            loading_since: Cell::new(Some(Instant::now())),
             volume: Cell::new(volume.clamp(0.0, 1.0)),
             video: Cell::new(false),
             last_bounds: Cell::new(None),
@@ -159,6 +180,12 @@ impl Player {
             resume: RefCell::new(None),
             restoring: Cell::new(false),
             waiting_restore: Cell::new(false),
+            login_open: Cell::new(false),
+            login_completed: Cell::new(false),
+            suppress_login: Cell::new(false),
+            recovered: Cell::new(false),
+            prefer_direct: Cell::new(false),
+            last_state: RefCell::new(Default::default()),
         };
         if crate::preview::active() {
             return result;
@@ -166,6 +193,10 @@ impl Player {
         let build = (|| -> Result<_, Box<dyn std::error::Error>> {
             let mut context = WebContext::new(Some(rustified_core::session::profile_dir()?));
             let repaint = cc.egui_ctx.clone();
+            let nav_repaint = repaint.clone();
+            let popup_repaint = repaint.clone();
+            let navigation_events = events.clone();
+            let popup_events = events.clone();
             let webview = WebViewBuilder::new_with_web_context(&mut context)
                 .with_additional_browser_args(BROWSER_ARGS)
                 .with_browser_accelerator_keys(false)
@@ -190,8 +221,25 @@ impl Player {
                         repaint.request_repaint();
                     }
                 })
-                .with_navigation_handler(|url| url == "about:blank" || playback_origin(&url))
-                .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
+                .with_navigation_handler(move |url| {
+                    if url == "about:blank" {
+                        return true;
+                    }
+                    if let Some(destination) = crate::navigation::destination(&url) {
+                        let _ = navigation_events.send(BridgeEvent::Navigation { destination });
+                        nav_repaint.request_repaint();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .with_new_window_req_handler(move |url, _| {
+                    if crate::navigation::destination(&url).is_some() {
+                        let _ = popup_events.send(BridgeEvent::Popup { url });
+                        popup_repaint.request_repaint();
+                    }
+                    wry::NewWindowResponse::Deny
+                })
                 .with_url(rustified_core::session::music_url(
                     rustified_core::session::load_session()
                         .ok()
@@ -221,6 +269,78 @@ impl Player {
     pub fn pump(&self) {
         while let Ok(event) = self.incoming.try_recv() {
             match event {
+                BridgeEvent::Navigation { destination } => {
+                    self.suspend();
+                    if destination == crate::navigation::Destination::Account {
+                        self.identity.set(crate::playback_session::Identity {
+                            signed_in: Some(false),
+                            auth_user: None,
+                        });
+                        if !self.suppress_login.get() {
+                            self.login_open.set(true);
+                        }
+                    }
+                    if std::env::args().any(|arg| arg == "--smoke-stream" || arg == "--smoke-login")
+                    {
+                        println!(
+                            "Media navigation: {}",
+                            if destination == crate::navigation::Destination::Music {
+                                "music"
+                            } else {
+                                "account"
+                            }
+                        );
+                    }
+                }
+                BridgeEvent::Popup { url } => {
+                    if let Some(destination) = crate::navigation::destination(&url) {
+                        if destination == crate::navigation::Destination::Account {
+                            self.login_open.set(true);
+                            self.suppress_login.set(false);
+                        }
+                        self.suspend();
+                        if let Some(webview) = &self.webview {
+                            let _ = webview.load_url(&url);
+                        }
+                    }
+                }
+                BridgeEvent::Stalled {
+                    document_id,
+                    generation,
+                    video_id,
+                    status,
+                } => {
+                    if self.document.borrow().as_ref() != Some(&document_id)
+                        || generation != self.generation.get()
+                        || !rustified_core::model::valid_video_id(&video_id)
+                        || self
+                            .resume
+                            .borrow()
+                            .as_ref()
+                            .is_none_or(|resume| resume["id"] != video_id)
+                        || self.login_open.get()
+                    {
+                        continue;
+                    }
+                    if status == "LOGIN_REQUIRED" {
+                        self.identity.set(crate::playback_session::Identity {
+                            signed_in: Some(false),
+                            auth_user: None,
+                        });
+                        self.eval(&json!({"op":"pause"}));
+                        self.notify_error(
+                            "Google requests sign-in for this track. Choose Continue with Google.",
+                        );
+                    } else if self.allowed() && !self.recovered.replace(true) {
+                        self.prefer_direct.set(true);
+                        if std::env::args().any(|arg| arg == "--smoke-stream") {
+                            println!("Recovering stalled navigation using the requested watch URL");
+                        }
+                        self.reconnect();
+                    } else {
+                        self.notify_error("YouTube couldn't load this track. Use Retry playback or try another result.");
+                    }
+                }
                 BridgeEvent::Session {
                     document_id,
                     identity,
@@ -248,6 +368,14 @@ impl Player {
                         }
                         self.quit_requested.set(true);
                     }
+                    if identity.signed_in == Some(true) && self.login_open.replace(false) {
+                        self.login_completed.set(true);
+                        self.suppress_login.set(false);
+                        if self.prefer_direct.get() && self.resume.borrow().is_some() {
+                            self.reconnect();
+                            continue;
+                        }
+                    }
                     if self.allowed() {
                         self.flush();
                     } else {
@@ -272,12 +400,18 @@ impl Player {
                         self.restoring.set(true);
                     }
                     self.ready.set(true);
+                    self.loading_since.set(None);
                     self.session_checked.set(Some(Instant::now()));
                     if rustified_core::session::native_enabled() {
                         self.capture_session(0);
                     }
                     if std::env::args().any(|arg| arg == "--smoke-stream") {
                         self.eval(&json!({"op":"diagnostic"}));
+                    }
+                    if std::env::args().any(|arg| arg == "--smoke-recovery")
+                        && !self.recovered.get()
+                    {
+                        self.eval(&json!({"op":"recovery_probe"}));
                     }
                     self.eval(&json!({"op":"volume","value":self.volume.get()}));
                     self.eval(&json!({"op":"mode","video":self.video.get()}));
@@ -350,7 +484,7 @@ impl Player {
                     if playing || error.is_some() || (!buffering && duration > 0.) {
                         self.requested.set(None);
                     }
-                    let _ = self.updates.send(PlayerState {
+                    let state = PlayerState {
                         seek_ack,
                         title,
                         transition,
@@ -365,7 +499,9 @@ impl Player {
                         video_height,
                         video_available,
                         error,
-                    });
+                    };
+                    *self.last_state.borrow_mut() = state.clone();
+                    let _ = self.updates.send(state);
                 }
             }
         }
@@ -375,7 +511,20 @@ impl Player {
             .is_some_and(|started| started.elapsed() > Duration::from_secs(40))
         {
             self.requested.set(None);
-            let _ = self.updates.send(PlayerState { generation:self.generation.get(),error:Some("YouTube did not start this track. Check your connection and try again. If Google requests sign-in, use Continue with Google.".into()),..Default::default() });
+            self.notify_error(
+                "YouTube did not start this track. Try Retry playback or another result.",
+            );
+        }
+        if !self.login_open.get()
+            && self
+                .loading_since
+                .get()
+                .is_some_and(|started| started.elapsed() > Duration::from_secs(25))
+        {
+            self.loading_since.set(None);
+            self.notify_error(
+                "The playback page couldn't finish loading. Try Retry playback or Google sign-in.",
+            );
         }
         if self.ready.get()
             && self
@@ -430,7 +579,8 @@ impl Player {
         self.expected_account.get() && self.authenticated() == Some(false)
     }
     fn allowed(&self) -> bool {
-        crate::playback_session::allowed(self.expected_account.get(), self.identity.get())
+        !self.login_open.get()
+            && crate::playback_session::allowed(self.expected_account.get(), self.identity.get())
     }
     pub fn require_account(&self, expected: bool) {
         self.expected_account.set(expected);
@@ -452,19 +602,65 @@ impl Player {
             self.requested.set(Some(Instant::now()));
         }
     }
-    pub fn reconnect(&self) {
-        self.eval(&json!({"op":"pause"}));
+    fn notify_error(&self, message: &str) {
+        self.requested.set(None);
+        let mut state = self.last_state.borrow().clone();
+        state.generation = self.generation.get();
+        state.playing = false;
+        state.buffering = false;
+        state.error = Some(message.into());
+        let _ = self.updates.send(state);
+    }
+    fn suspend(&self) {
+        self.loading_since.set(Some(Instant::now()));
         self.ready.set(false);
         self.identity.set(Default::default());
         *self.document.borrow_mut() = None;
         self.restoring.set(true);
         self.requested.set(None);
+    }
+    pub fn login_open(&self) -> bool {
+        self.login_open.get()
+    }
+    pub fn take_login_completed(&self) -> bool {
+        self.login_completed.replace(false)
+    }
+    pub fn begin_login(&self) {
+        self.eval(&json!({"op":"pause"}));
+        self.suspend();
+        self.suppress_login.set(false);
+        self.login_open.set(true);
         if let Some(webview) = &self.webview {
-            let index = rustified_core::session::load_session()
-                .ok()
-                .flatten()
-                .and_then(|saved| saved.auth_user);
-            let _ = webview.load_url(&rustified_core::session::music_url(index));
+            let _ = webview.load_url(&crate::navigation::sign_in_url());
+        }
+    }
+    pub fn cancel_login(&self) {
+        self.login_completed.set(false);
+        self.login_open.set(false);
+        self.suppress_login.set(true);
+        self.reconnect();
+    }
+    pub fn reconnect(&self) {
+        self.eval(&json!({"op":"pause"}));
+        self.suspend();
+        let index = rustified_core::session::load_session()
+            .ok()
+            .flatten()
+            .and_then(|saved| saved.auth_user);
+        let url = {
+            let mut resume = self.resume.borrow_mut();
+            resume
+                .as_mut()
+                .and_then(|resume| {
+                    resume["direct"] = json!(true);
+                    resume["id"]
+                        .as_str()
+                        .and_then(|id| crate::navigation::watch_url(id, index))
+                })
+                .unwrap_or_else(|| rustified_core::session::music_url(index))
+        };
+        if let Some(webview) = &self.webview {
+            let _ = webview.load_url(&url);
         }
     }
     pub fn send(&self, command: PlayerCommand) {
@@ -477,11 +673,17 @@ impl Player {
                     return;
                 }
                 self.generation.set(generation);
+                self.recovered.set(false);
                 self.requested.set(Some(Instant::now()));
                 let play = json!({"op":"play","generation":generation,"id":video_id,"position":0,"paused":false});
                 *self.resume.borrow_mut() = Some(play.clone());
                 self.restoring.set(false);
                 self.waiting_restore.set(false);
+                if self.prefer_direct.get() && !self.login_open.get() {
+                    self.recovered.set(true);
+                    self.reconnect();
+                    return;
+                }
                 play
             }
             PlayerCommand::Toggle => {
@@ -571,6 +773,13 @@ mod tests {
     }
     #[test]
     fn bridge_rejects_unknown_commands_and_non_finite_positions() {
+        for event in [
+            r#"{"type":"popup","url":"https://accounts.google.com/"}"#,
+            r#"{"type":"navigation","destination":"account"}"#,
+        ] {
+            assert!(serde_json::from_str::<super::BridgeEvent>(event).is_err());
+        }
+
         assert!(
             serde_json::from_str::<super::BridgeEvent>(
                 r#"{"type":"shortcut","action":"launch_process"}"#

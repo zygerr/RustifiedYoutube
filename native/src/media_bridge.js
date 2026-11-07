@@ -1,6 +1,6 @@
 (() => {
   if (location.origin !== 'https://music.youtube.com' || window.__rustifiedMedia) return;
-  const session = { generation: 0, target: '', playing: false, volume: .5, video: false, ready: false, counterpartUntil: 0, changed: 0, error: null, modeApplied: false, appliedMode: null, transition: null, diagnostic: false, lastPosition: 0, lastDuration: 0, seekRequest: null, seekAck: 0, restore: null, restoreSeek: false, fallbackMode: null };
+  const session = { generation: 0, target: '', playing: false, volume: .5, video: false, ready: false, counterpartUntil: 0, changed: 0, error: null, modeApplied: false, appliedMode: null, transition: null, diagnostic: false, lastPosition: 0, lastDuration: 0, seekRequest: null, seekAck: 0, restore: null, restoreSeek: false, fallbackMode: null, stalledSent: false, recoveryProbe: false, probeIgnored: false };
   let last = '', boundVideo = null, ended = false, playAttempt = 0, lastAd = false;
   if (Number.isFinite(window.__rustifiedInitialVolume)) session.volume=Math.max(0,Math.min(1,window.__rustifiedInitialVolume));
   const documentId = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
@@ -102,6 +102,7 @@
       const media = video();
       switch (command.op) {
         case 'diagnostic': session.diagnostic=true; break;
+        case 'recovery_probe': session.recoveryProbe=true; break;
         case 'play':
           if (!/^[\w-]{11}$/.test(command.id)) return;
           session.generation = command.generation;
@@ -110,6 +111,7 @@
           session.changed = performance.now();
           session.counterpartUntil = 0;
           session.error = null;
+          session.stalledSent=false;
           session.modeApplied = false;
           session.appliedMode = null;
           session.transition = null;
@@ -122,7 +124,11 @@
           session.restore=Number.isFinite(command.position) && command.position>0 ? {position:command.position,revision:command.revision || 0} : null;
           ended = false;
           applyVolume();
-          document.dispatchEvent(new CustomEvent('yt-navigate', { detail: { endpoint: { watchEndpoint: { videoId: command.id, playlistId: 'RDAMVM' + command.id } } } }));
+          if (!command.direct || dataId()!==command.id) {
+            if(session.recoveryProbe) session.probeIgnored=true;
+            if(!session.recoveryProbe) document.dispatchEvent(new CustomEvent('yt-navigate', { detail: { endpoint: { watchEndpoint: { videoId: command.id, playlistId: 'RDAMVM' + command.id } } } }));
+            session.recoveryProbe=false;
+          }
           break;
         case 'toggle':
           session.playing = media ? media.paused : !session.playing;
@@ -189,7 +195,7 @@
       }, true);
     }
     if (!session.generation) { media?.pause(); return; }
-    let id = dataId();
+    let id = session.probeIgnored ? '' : dataId();
     const ad = isAd();
     lastAd = ad;
     const nearEnd = session.lastDuration > 0 && session.lastPosition >= session.lastDuration - 1.5;
@@ -217,9 +223,21 @@
       if (media?.readyState>=2) session.target = id;
     }
     const matches = id === session.target;
+    const response=player?.getPlayerResponse?.();
+    const status=response?.playabilityStatus?.status || '';
+    const responseId=response?.videoDetails?.videoId;
+    const elapsed=performance.now()-session.changed;
+    const loginRequired=matches && (!responseId || responseId===session.target) && status==='LOGIN_REQUIRED' && elapsed>1000;
+    const cannotOpen=(!matches && elapsed>4500) || ((!media || media.readyState<2) && elapsed>12000);
+    if (!ad && !session.transition && !session.stalledSent &&
+        (loginRequired || (cannotOpen && (session.playing || session.restore)))) {
+      session.stalledSent=true;
+      session.error=loginRequired ? 'Google requests sign-in for this track.' : 'YouTube is retrying the requested track…';
+      send({type:'stalled',generation:session.generation,video_id:session.target,status:loginRequired?'LOGIN_REQUIRED':matches && ['ERROR','UNPLAYABLE'].includes(status)?status:'NAVIGATION_STALLED'});
+    }
     if (!matches && !ad) {
       if (media && !media.paused) media.pause();
-      if (session.playing && performance.now() - session.changed > 30000) session.error = 'YouTube could not open this track. Reconnect your account or try another result.';
+
     } else if (media) {
       if (!ad && !session.modeApplied && media.readyState >= 1) { session.modeApplied = true; setMode(); }
       if (session.playing && !session.restore && !session.restoreSeek && media.paused && !ended && performance.now() - playAttempt > 1000) {

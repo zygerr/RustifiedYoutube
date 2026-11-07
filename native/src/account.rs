@@ -13,9 +13,14 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, Notify, RwLock, watch};
+use tokio::sync::{Mutex, RwLock, watch};
 pub fn smoke_active() -> bool {
-    std::env::args().any(|arg| matches!(arg.as_str(), "--smoke-account" | "--smoke-player-session"))
+    std::env::args().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--smoke-account" | "--smoke-player-session" | "--smoke-login"
+        )
+    })
 }
 
 struct State {
@@ -32,7 +37,6 @@ pub struct Account {
     next_capture: AtomicU64,
     control_epoch: AtomicU64,
     reported: AtomicBool,
-    control_changed: Notify,
     responses: mpsc::Sender<Response>,
     ctx: eframe::egui::Context,
 }
@@ -59,7 +63,6 @@ impl Account {
             next_capture: AtomicU64::new(1),
             control_epoch: AtomicU64::new(0),
             reported: AtomicBool::new(connected),
-            control_changed: Notify::new(),
             responses,
             ctx,
         };
@@ -128,7 +131,7 @@ impl Account {
             drop(state);
             if client.signed_in() {
                 self.connected(true);
-                self.status("Google account connected · automatic session refresh is on");
+                self.status("Google account connected · browser session synchronized");
             }
             return Ok((revision, client));
         }
@@ -167,7 +170,7 @@ impl Account {
             match self.client().await {
                 Ok((_, client)) if client.signed_in() => {
                     self.connected(true);
-                    self.status("Google account connected · automatic session refresh is on");
+                    self.status("Google account connected · browser session synchronized");
                 }
                 Err(error) if is_auth_error(&error) => {
                     self.connected(false);
@@ -309,46 +312,19 @@ impl Account {
             }
         }
         if needs_login {
-            anyhow::ensure!(
-                !smoke_active() && !std::env::args().any(|arg| arg == "--smoke-stream"),
-                "Google requires interactive sign-in"
-            );
-            let cancelled = self.control_changed.notified();
-            tokio::pin!(cancelled);
-            cancelled.as_mut().enable();
-            anyhow::ensure!(
-                self.control_epoch.load(Ordering::SeqCst) == epoch,
-                "Account connection changed"
-            );
-            self.status("Complete Google sign-in in the connection window.");
-            let mut command =
-                tokio::process::Command::new(session::adjacent_tool("rustified-auth.exe"));
-            command.kill_on_drop(true);
-            let status = tokio::select! {status=command.status()=>status?,_=&mut cancelled=>anyhow::bail!("Account connection cancelled")};
-            anyhow::ensure!(status.success(), "Sign-in was closed before completion");
-            anyhow::ensure!(
-                self.control_epoch.load(Ordering::SeqCst) == epoch,
-                "Account connection changed"
-            );
-            let saved = session::load_session()?.context("Sign-in wasn't completed")?;
-            self.store(saved).await?;
-            self.state.write().await.client = None;
-            anyhow::ensure!(
-                self.client().await?.1.signed_in(),
-                "Google sign-in wasn't completed"
-            );
+            self.status("Complete Google sign-in in the account panel.");
+            return Ok(false);
         }
         anyhow::ensure!(
             self.control_epoch.load(Ordering::SeqCst) == epoch,
             "Account connection changed"
         );
         self.connected(true);
-        self.status("Google account connected · automatic session refresh is on");
-        Ok(needs_login)
+        self.status("Google account connected · browser session synchronized");
+        Ok(true)
     }
     pub async fn disconnect(&self) -> Result<()> {
         self.control_epoch.fetch_add(1, Ordering::SeqCst);
-        self.control_changed.notify_waiters();
         let mut state = self.state.write().await;
         let result = session::disconnect();
         state.enabled = false;
@@ -387,7 +363,6 @@ mod tests {
                 next_capture: AtomicU64::new(5),
                 control_epoch: AtomicU64::new(0),
                 reported: AtomicBool::new(enabled),
-                control_changed: Notify::new(),
                 responses,
                 ctx: Default::default(),
             }),

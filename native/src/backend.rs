@@ -24,7 +24,8 @@ pub enum Response {
     Ready(bool),
     CaptureSession(u64),
     AccountStatus(String),
-    ConnectFinished { browser_login: bool },
+    OpenSignIn,
+    ConnectFinished,
     Tracks(u64, Result<Vec<Track>, String>),
     Library(Result<Vec<Playlist>, String>),
     History(Result<Vec<Track>, String>),
@@ -102,8 +103,9 @@ impl Backend {
                             Request::Connect {force_login} => {
                                 let result=account.connect(force_login).await;
                                 if result.is_err() {send(&updates,&ctx,Response::AccountStatus("Connection couldn't finish. Your saved account is kept; try again when online, or complete Google sign-in if prompted.".into()));}
-                                else {send(&updates,&ctx,Response::Ready(true));}
-                                send(&updates,&ctx,Response::ConnectFinished {browser_login:result.unwrap_or(false)});
+                                else if matches!(result,Ok(true)) {send(&updates,&ctx,Response::Ready(true));}
+                                else {send(&updates,&ctx,Response::OpenSignIn);}
+                                send(&updates,&ctx,Response::ConnectFinished);
                             }
                             Request::Captured(capture)=>account.captured(capture).await,
                             Request::Disconnect => {
