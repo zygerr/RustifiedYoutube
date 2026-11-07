@@ -1,6 +1,6 @@
 [package]
 name = "rustified-youtube"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Rust desktop companion for YouTube Music"
 authors = ["zygerr"]
 edition = "2021"

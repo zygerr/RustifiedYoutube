@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Show the running app version in Help → About RustifiedYoutube and its native About dialog.
+
 ## 0.1.1
 
 - Keep HTTPS login redirects and reloads inside the application instead of launching the default browser.

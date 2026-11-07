@@ -3,7 +3,7 @@
 mod navigation;
 
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     webview::NewWindowResponse,
     AppHandle, Manager, Theme, WebviewUrl, WebviewWindowBuilder, WindowEvent,
@@ -92,6 +92,20 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let mute = item("mute", "Mute / unmute", Some("Ctrl+Alt+M"))?;
     let releases = item("releases", "Releases on GitHub", None::<&str>)?;
     let connection_help = item("connection_help", "Connection help", None::<&str>)?;
+    let version = app.package_info().version.to_string();
+    let about = PredefinedMenuItem::about(
+        app,
+        Some(&format!("About RustifiedYoutube v{version}")),
+        Some(AboutMetadata {
+            name: Some("RustifiedYoutube".into()),
+            version: Some(version),
+            authors: Some(vec!["zygerr".into()]),
+            comments: Some("YouTube Music desktop client".into()),
+            website: Some("https://github.com/zygerr/RustifiedYoutube".into()),
+            website_label: Some("GitHub".into()),
+            ..Default::default()
+        }),
+    )?;
     let separator = PredefinedMenuItem::separator(app)?;
     let app_menu = Submenu::with_items(
         app,
@@ -101,7 +115,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let playback_menu =
         Submenu::with_items(app, "&Playback", true, &[&play, &next, &previous, &mute])?;
-    let help_menu = Submenu::with_items(app, "&Help", true, &[&connection_help, &releases])?;
+    let help_menu = Submenu::with_items(
+        app,
+        "&Help",
+        true,
+        &[&about, &separator, &connection_help, &releases],
+    )?;
     app.set_menu(Menu::with_items(
         app,
         &[&app_menu, &playback_menu, &help_menu],

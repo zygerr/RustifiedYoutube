@@ -24,6 +24,8 @@ npm run dev
 
 ## Controls
 
+Find the running version in **Help → About RustifiedYoutube**. The menu label and About dialog use the application's build version automatically.
+
 Shortcuts work while the application is focused. Track controls operate on the YouTube Music player after a track has been selected.
 
 | Action | Shortcut |
