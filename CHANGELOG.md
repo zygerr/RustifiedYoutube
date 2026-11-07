@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.4
+
+- Restore the native account directly from the application's persistent WebView2 profile at startup and refresh its cookies every five minutes.
+- Reuse the browser's actual User-Agent for authenticated metadata requests and migrate previous encrypted session files automatically.
+- Refresh rejected authenticated requests from the current browser session and retry once, with concurrent refreshes coordinated together.
+- Keep saved credentials and the account connection across transient network/server failures; distinguish a rejected request from a confirmed Google sign-out.
+- Make Continue with Google reuse an existing account first and open the login helper only when interactive sign-in is required. Refreshing no longer reloads or resets music playback.
+- Require a confirmed signed-in YouTube Music page before the login helper saves the session; report cancelled sign-in correctly.
+- Persist explicit native disconnection so background synchronization cannot reconnect it, and cancel an open sign-in when disconnected.
+- Write DPAPI-protected session updates atomically, add session migration/error/concurrency checks, and test account restoration across restarts and during playback.
+
 ## 0.3.3
 
 - Restyle the native interface around YouTube Music's black surfaces, white typography and playback controls, red seek progress, search field, mood chips, and content shelves.

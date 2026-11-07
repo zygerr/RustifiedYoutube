@@ -14,6 +14,40 @@ pub struct Catalog {
     signed: Option<YtMusic<BrowserToken>>,
 }
 
+#[derive(Debug)]
+pub struct SessionExpired;
+impl std::fmt::Display for SessionExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Google sign-in needs to be renewed")
+    }
+}
+impl std::error::Error for SessionExpired {}
+#[derive(Debug)]
+pub struct AuthRejected;
+impl std::fmt::Display for AuthRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("YouTube did not authorize this request")
+    }
+}
+impl std::error::Error for AuthRejected {}
+pub fn is_auth_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|error| error.is::<SessionExpired>() || error.is::<AuthRejected>())
+}
+pub fn is_expired_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|error| error.is::<SessionExpired>())
+}
+fn api_error(error: ytmapi_rs::Error) -> anyhow::Error {
+    match error.into_kind() {
+        ytmapi_rs::error::ErrorKind::OtherErrorCodeInResponse {
+            code: 401 | 403, ..
+        } => AuthRejected.into(),
+        ytmapi_rs::error::ErrorKind::Header => SessionExpired.into(),
+        other => ytmapi_rs::Error::from(other).into(),
+    }
+}
+
 fn cover(images: &[Thumbnail]) -> String {
     images
         .iter()
@@ -55,11 +89,17 @@ fn playlist_track(item: PlaylistItem) -> Option<Track> {
 
 impl Catalog {
     pub async fn new(cookie: Option<&str>) -> Result<Self> {
+        Self::bootstrap(cookie, None).await
+    }
+    pub async fn from_session(session: &crate::session::SavedSession) -> Result<Self> {
+        Self::bootstrap(Some(&session.cookies), session.user_agent.as_deref()).await
+    }
+    async fn bootstrap(cookie: Option<&str>, user_agent: Option<&str>) -> Result<Self> {
         let http = reqwest::Client::builder()
             .http1_only()
-            .user_agent(
+            .user_agent(user_agent.unwrap_or(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0",
-            )
+            ))
             .timeout(std::time::Duration::from_secs(25))
             .build()?;
         // The library bootstrap appends an empty query string to the homepage.
@@ -68,6 +108,9 @@ impl Catalog {
             .get("https://music.youtube.com/")
             .header("Cookie", cookie.unwrap_or("SOCS=CAI"));
         let html = request.send().await?.error_for_status()?.text().await?;
+        if cookie.is_some() && config_value::<bool>(&html, "LOGGED_IN").ok() == Some(false) {
+            return Err(SessionExpired.into());
+        }
         let visitor_id = config_string(&html, "VISITOR_DATA")?;
         let client_version = config_string(&html, "INNERTUBE_CLIENT_VERSION")?;
         let guest_token: NoAuthToken = serde_json::from_value(
@@ -82,7 +125,8 @@ impl Catalog {
                 let sapisid = cookie
                     .split(';')
                     .find_map(|part| part.trim().strip_prefix("SAPISID="))
-                    .context("Google session is incomplete")?;
+                    .filter(|value| !value.is_empty())
+                    .ok_or(SessionExpired)?;
                 let token: BrowserToken = serde_json::from_value(
                     serde_json::json!({"sapisid": sapisid, "client_version": client_version, "cookies": cookie}),
                 )?;
@@ -139,15 +183,15 @@ impl Catalog {
             let query = SearchQuery::<FilteredSearch<VideosFilter>>::from(text)
                 .with_spelling_mode(SpellingMode::WithSuggestions);
             match &self.signed {
-                Some(api) => api.json_query(query).await?,
-                None => self.guest.json_query(query).await?,
+                Some(api) => api.json_query(query).await.map_err(api_error)?,
+                None => self.guest.json_query(query).await.map_err(api_error)?,
             }
         } else {
             let query = SearchQuery::<FilteredSearch<SongsFilter>>::from(text)
                 .with_spelling_mode(SpellingMode::WithSuggestions);
             match &self.signed {
-                Some(api) => api.json_query(query).await?,
-                None => self.guest.json_query(query).await?,
+                Some(api) => api.json_query(query).await.map_err(api_error)?,
+                None => self.guest.json_query(query).await.map_err(api_error)?,
             }
         };
         let json: serde_json::Value = ytmapi_rs::json::from_json(json)?;
@@ -157,10 +201,7 @@ impl Catalog {
     }
 
     pub async fn library(&self) -> Result<Vec<Playlist>> {
-        let api = self
-            .signed
-            .as_ref()
-            .context("Connect your Google account to open your library")?;
+        let api = self.signed.as_ref().ok_or(SessionExpired)?;
         let mut playlists = Vec::new();
         let mut continuation = None;
         for _ in 0..30 {
@@ -168,7 +209,8 @@ impl Catalog {
                 .query(LibraryQuery {
                     continuation: continuation.clone(),
                 })
-                .await?;
+                .await
+                .map_err(api_error)?;
             for playlist in page.playlists {
                 if !playlists.iter().any(|p: &Playlist| p.id == playlist.id) {
                     playlists.push(playlist);
@@ -183,12 +225,12 @@ impl Catalog {
     }
 
     pub async fn history(&self) -> Result<Vec<Track>> {
-        let api = self
-            .signed
-            .as_ref()
-            .context("Connect your Google account to load listening history")?;
-        let json: serde_json::Value =
-            ytmapi_rs::json::from_json(api.json_query(ytmapi_rs::query::GetHistoryQuery).await?)?;
+        let api = self.signed.as_ref().ok_or(SessionExpired)?;
+        let json: serde_json::Value = ytmapi_rs::json::from_json(
+            api.json_query(ytmapi_rs::query::GetHistoryQuery)
+                .await
+                .map_err(api_error)?,
+        )?;
         let mut tracks = Vec::new();
         collect_history(&json, &mut tracks);
         let mut seen = std::collections::HashSet::new();
@@ -205,8 +247,19 @@ impl Catalog {
         };
         let query = GetPlaylistTracksQuery::new(PlaylistID::from_raw(browse_id));
         let pages: Vec<Vec<PlaylistItem>> = match &self.signed {
-            Some(api) => api.stream(&query).take(100).try_collect().await?,
-            None => self.guest.stream(&query).take(100).try_collect().await?,
+            Some(api) => api
+                .stream(&query)
+                .take(100)
+                .try_collect()
+                .await
+                .map_err(api_error)?,
+            None => self
+                .guest
+                .stream(&query)
+                .take(100)
+                .try_collect()
+                .await
+                .map_err(api_error)?,
         };
         Ok(pages
             .into_iter()
@@ -216,10 +269,7 @@ impl Catalog {
     }
 
     pub async fn like(&self, id: &str, liked: bool) -> Result<()> {
-        let api = self
-            .signed
-            .as_ref()
-            .context("Connect your account to like songs")?;
+        let api = self.signed.as_ref().ok_or(SessionExpired)?;
         api.rate_song(
             VideoID::from_raw(id),
             if liked {
@@ -228,7 +278,8 @@ impl Catalog {
                 LikeStatus::Indifferent
             },
         )
-        .await?;
+        .await
+        .map_err(api_error)?;
         Ok(())
     }
 }
@@ -483,6 +534,9 @@ fn collect_library(value: &serde_json::Value, page: &mut LibraryPage) {
 }
 
 fn config_string(html: &str, key: &str) -> Result<String> {
+    config_value(html, key)
+}
+fn config_value<T: serde::de::DeserializeOwned>(html: &str, key: &str) -> Result<T> {
     let marker = format!("\"{key}\":");
     let (_, value) = html
         .split_once(&marker)
@@ -494,6 +548,38 @@ fn config_string(html: &str, key: &str) -> Result<String> {
 #[cfg(test)]
 mod bootstrap_tests {
     use super::config_string;
+    #[test]
+    fn auth_rejections_refresh_but_do_not_prove_google_signed_out() {
+        for code in [401, 403] {
+            let error =
+                ytmapi_rs::Error::from(ytmapi_rs::error::ErrorKind::OtherErrorCodeInResponse {
+                    code,
+                    message: "fixture".into(),
+                });
+            let error = super::api_error(error);
+            assert!(super::is_auth_error(&error));
+            assert!(!super::is_expired_error(&error));
+        }
+        for code in [429, 500, 503] {
+            let error =
+                ytmapi_rs::Error::from(ytmapi_rs::error::ErrorKind::OtherErrorCodeInResponse {
+                    code,
+                    message: "fixture".into(),
+                });
+            assert!(!super::is_auth_error(&super::api_error(error)));
+        }
+        assert!(!super::is_auth_error(&anyhow::anyhow!("Network timeout")));
+        assert!(
+            !super::config_value::<bool>(
+                r#"ytcfg.set({"LOGGED_IN":false,"OTHER":true});"#,
+                "LOGGED_IN"
+            )
+            .unwrap()
+        );
+        assert!(
+            super::config_value::<bool>(r#"ytcfg.set({"LOGGED_IN":true});"#, "LOGGED_IN").unwrap()
+        );
+    }
     #[test]
     fn history_keeps_order_full_titles_and_fixed_duration() {
         let row = |id, title: &str| {

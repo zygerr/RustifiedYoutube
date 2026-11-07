@@ -1,15 +1,11 @@
 use eframe::egui;
-use rustified_core::{
-    api::Catalog,
-    model::{Playlist, SearchFilter, Track},
-    session,
-};
+use rustified_core::model::{Playlist, SearchFilter, Track};
 use std::{
     collections::HashMap,
     sync::{Arc, mpsc},
     time::Duration,
 };
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::Semaphore;
 
 pub enum Request {
     Search(u64, String, SearchFilter),
@@ -18,6 +14,7 @@ pub enum Request {
     History,
     Discover,
     Connect,
+    Captured(crate::account::Capture),
     Disconnect,
     Like(String, bool),
     Cover(String),
@@ -25,6 +22,9 @@ pub enum Request {
 
 pub enum Response {
     Ready(bool),
+    CaptureSession(u64),
+    AccountStatus(String),
+    ConnectFinished,
     Tracks(u64, Result<Vec<Track>, String>),
     Library(Result<Vec<Playlist>, String>),
     History(Result<Vec<Track>, String>),
@@ -59,28 +59,12 @@ impl Backend {
                 .build()
                 .expect("background runtime");
             runtime.block_on(async move {
-                let mut cookie = session::load_cookie().ok().flatten();
-                let client = match Catalog::new(cookie.as_deref()).await {
-                    Ok(api) => api,
-                    Err(_) => {
-                        cookie = None;
-                        send(&updates, &ctx, Response::Notice("Couldn't reconnect. You can still search, or connect your Google account again.".into()));
-                        match Catalog::new(None).await {
-                            Ok(api) => api,
-                            Err(_) => { send(&updates, &ctx, Response::Notice("Couldn't reach YouTube Music. Check your internet connection and restart the app.".into())); return; }
-                        }
-                    }
-                };
-                let signed_in = client.signed_in();
-                let api = Arc::new(RwLock::new(Arc::new(client)));
-                let cookie = Arc::new(RwLock::new(cookie));
-                send(&updates, &ctx, Response::Ready(signed_in));
+                let account=Arc::new(crate::account::Account::new(updates.clone(),ctx.clone()));
                 let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().expect("image client");
                 let images = Arc::new(Semaphore::new(4));
                 let mut search_jobs: HashMap<u64, tokio::task::JoinHandle<()>> = HashMap::new();
                 while let Some(request) = requests.recv().await {
-                    let api = api.clone();
-                    let cookie = cookie.clone();
+                    let account = account.clone();
                     let updates = updates.clone();
                     let ctx = ctx.clone();
                     let http = http.clone();
@@ -92,54 +76,37 @@ impl Backend {
                     let job = tokio::spawn(async move {
                         match request {
                             Request::Discover => {
-                                let client=api.read().await.clone();
-                                let result=client.search("popular music").await.map_err(|_|"Couldn't load Discover. Try refreshing.".into());
+                                let result=account.execute_public(|client|async move {client.search("popular music").await}).await.map_err(|_|"Couldn't load Discover. Check your connection and try refreshing.".into());
                                 send(&updates,&ctx,Response::Discover(result));
                             }
                             Request::Search(id, query, filter) => {
-                                let client = api.read().await.clone();
-                                let result = client.search_filtered(&query, filter).await.map_err(|_| "Search couldn't load. Check your connection and try again.".into());
+                                let result=account.execute_public(|client|{let query=query.clone();async move {client.search_filtered(&query,filter).await}}).await.map_err(|_|"Search couldn't load. Check your connection and try again.".into());
                                 send(&updates, &ctx, Response::Tracks(id, result));
                             }
                             Request::Playlist(id, playlist) => {
-                                let client = api.read().await.clone();
-                                let result = client.playlist(&playlist).await.map_err(|_| "Couldn't load this playlist. Reconnect your Google account and try again.".into());
+                                let result=account.execute(|client|{let playlist=playlist.clone();async move {client.playlist(&playlist).await}}).await.map_err(|_|"Couldn't load this playlist. Check your connection and try again.".into());
                                 send(&updates, &ctx, Response::Tracks(id, result));
                             }
                             Request::Library => {
-                                let client = api.read().await.clone();
-                                let result = client.library().await.map_err(|_| "Your library couldn't load. Connect or reconnect your Google account.".into());
+                                let result=account.execute(|client|async move {client.library().await}).await.map_err(|_|"Your library couldn't load. Check your connection; your saved account is kept.".into());
                                 send(&updates, &ctx, Response::Library(result));
                             }
                             Request::History => {
-                                let client=api.read().await.clone();
-                                let result=client.history().await.map_err(|_|"Couldn't refresh your listening history. Recent tracks from this app are still available.".into());
+                                let result=account.execute(|client|async move {client.history().await}).await.map_err(|_|"Couldn't refresh listening history. Your saved session and recent tracks are kept.".into());
                                 send(&updates,&ctx,Response::History(result));
                             }
                             Request::Like(id, liked) => {
-                                let client = api.read().await.clone();
-                                let success = client.like(&id, liked).await.is_ok();
+                                let success=account.execute(|client|{let id=id.clone();async move {client.like(&id,liked).await}}).await.is_ok();
                                 send(&updates, &ctx, Response::Liked(id, liked, success));
                             }
                             Request::Connect => {
-                                let result = tokio::process::Command::new(session::adjacent_tool("rustified-auth.exe")).kill_on_drop(true).status().await;
-                                if result.is_ok_and(|s| s.success())
-                                    && let Ok(Some(new_cookie)) = session::load_cookie()
-                                        && let Ok(client) = Catalog::new(Some(&new_cookie)).await {
-                                            *api.write().await = Arc::new(client);
-                                            *cookie.write().await = Some(new_cookie);
-                                            send(&updates, &ctx, Response::Ready(true));
-                                            return;
-                                        }
-                                send(&updates, &ctx, Response::Notice("Connection wasn't completed. You can try again whenever you're ready.".into()));
+                                if account.connect().await.is_err() {send(&updates,&ctx,Response::AccountStatus("Connection couldn't finish. Your saved account is kept; try again when online, or complete Google sign-in if prompted.".into()));}
+                                else {send(&updates,&ctx,Response::Ready(true));}
+                                send(&updates,&ctx,Response::ConnectFinished);
                             }
+                            Request::Captured(capture)=>account.captured(capture).await,
                             Request::Disconnect => {
-                                if session::disconnect().is_ok()
-                                    && let Ok(client) = Catalog::new(None).await {
-                                        *api.write().await = Arc::new(client);
-                                        *cookie.write().await = None;
-                                        send(&updates, &ctx, Response::Ready(false));
-                                    }
+                                if account.disconnect().await.is_err(){send(&updates,&ctx,Response::Notice("Couldn't disconnect the native library session. Try again.".into()));}
                             }
                             Request::Cover(url) => {
                                 let Ok(parsed) = reqwest::Url::parse(&url) else { return; };

@@ -6,7 +6,7 @@ use std::{
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };
-use wry::{WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
+use wry::{WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows};
 
 pub const BROWSER_ARGS: &str = "--autoplay-policy=no-user-gesture-required";
 
@@ -15,7 +15,6 @@ pub enum PlayerCommand {
     Toggle,
     Volume(f64),
     Stop,
-    Reload,
     Video(bool),
 }
 #[derive(Default, Clone, PartialEq)]
@@ -106,14 +105,17 @@ pub struct Player {
     video: Cell<bool>,
     last_bounds: Cell<Option<[i32; 4]>>,
     quit_requested: Cell<bool>,
-    current_video: RefCell<Option<String>>,
-    last_playing: Cell<bool>,
     seek_revision: Cell<u64>,
+    pub session_rx: Receiver<crate::account::Capture>,
+    session_tx: Sender<crate::account::Capture>,
+    session_checked: Cell<Option<Instant>>,
+    repaint: egui::Context,
 }
 impl Player {
     pub fn start(cc: &eframe::CreationContext<'_>, volume: f64) -> Self {
         let (events, incoming) = mpsc::channel();
         let (updates, rx) = mpsc::channel();
+        let (session_tx, session_rx) = mpsc::channel();
         let mut result = Self {
             webview: None,
             _context: None,
@@ -128,9 +130,11 @@ impl Player {
             video: Cell::new(false),
             last_bounds: Cell::new(None),
             quit_requested: Cell::new(false),
-            current_video: RefCell::new(None),
-            last_playing: Cell::new(false),
             seek_revision: Cell::new(0),
+            session_rx,
+            session_tx,
+            session_checked: Cell::new(None),
+            repaint: cc.egui_ctx.clone(),
         };
         if crate::preview::active() {
             return result;
@@ -196,6 +200,10 @@ impl Player {
                 } => self.quit_requested.set(true),
                 BridgeEvent::Ready => {
                     self.ready.set(true);
+                    self.session_checked.set(Some(Instant::now()));
+                    if rustified_core::session::native_enabled() {
+                        self.capture_session(0);
+                    }
                     if std::env::args().any(|arg| arg == "--smoke-stream") {
                         self.eval(&json!({"op":"diagnostic"}));
                     }
@@ -251,7 +259,6 @@ impl Player {
                     if playing || error.is_some() || (!buffering && duration > 0.) {
                         self.requested.set(None);
                     }
-                    self.last_playing.set(playing);
                     let _ = self.updates.send(PlayerState {
                         seek_ack,
                         title,
@@ -277,7 +284,39 @@ impl Player {
             .is_some_and(|started| started.elapsed() > Duration::from_secs(40))
         {
             self.requested.set(None);
-            let _ = self.updates.send(PlayerState { generation:self.generation.get(),error:Some("YouTube did not start this track. Use Connect Google to refresh your account, then try again.".into()),..Default::default() });
+            let _ = self.updates.send(PlayerState { generation:self.generation.get(),error:Some("YouTube did not start this track. Check your connection and try again. If Google requests sign-in, use Continue with Google.".into()),..Default::default() });
+        }
+        if self.ready.get()
+            && self
+                .session_checked
+                .get()
+                .is_none_or(|checked| checked.elapsed() > Duration::from_secs(300))
+        {
+            self.session_checked.set(Some(Instant::now()));
+            if rustified_core::session::native_enabled() {
+                self.capture_session(0);
+            }
+        }
+    }
+    pub fn capture_session(&self, id: u64) {
+        let tx = self.session_tx.clone();
+        let repaint = self.repaint.clone();
+        let result = (|| -> windows::core::Result<()> {
+            let webview = self.webview.as_ref().ok_or_else(|| {
+                windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32))
+            })?;
+            let core = unsafe { webview.controller().CoreWebView2()? };
+            rustified_core::browser_session::capture(&core, move |result| {
+                let _ = tx.send(crate::account::Capture { id, result });
+                repaint.request_repaint();
+            })
+        })();
+        if result.is_err() {
+            let _ = self.session_tx.send(crate::account::Capture {
+                id,
+                result: Err(()),
+            });
+            self.repaint.request_repaint();
         }
     }
     fn eval(&self, command: &Value) {
@@ -296,7 +335,6 @@ impl Player {
                     return;
                 }
                 self.generation.set(generation);
-                self.current_video.replace(Some(video_id.clone()));
                 self.requested.set(Some(Instant::now()));
                 self.pending.borrow_mut().clear();
                 json!({"op":"play","generation":generation,"id":video_id})
@@ -313,17 +351,6 @@ impl Player {
             PlayerCommand::Video(video) => {
                 self.video.set(video);
                 json!({"op":"mode","video":video})
-            }
-            PlayerCommand::Reload => {
-                self.ready.set(false);
-                self.pending.borrow_mut().clear();
-                if let Some(id) = self.current_video.borrow().as_ref() {
-                    self.pending.borrow_mut().push(json!({"op":"play","id":id,"generation":self.generation.get(),"paused":!self.last_playing.get()}));
-                }
-                if let Some(webview) = &self.webview {
-                    let _ = webview.reload();
-                }
-                return;
             }
         };
         if self.ready.get() {

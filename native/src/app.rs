@@ -41,6 +41,11 @@ struct StreamCheck {
     selected: Option<std::time::Instant>,
     stage: u8,
     last_trace: u64,
+    session_refreshed: bool,
+}
+struct AccountCheck {
+    started: std::time::Instant,
+    phase: u8,
 }
 
 enum TrayAction {
@@ -78,6 +83,8 @@ pub struct MusicApp {
     preparation: String,
     connecting: bool,
     connected: bool,
+    account_status: String,
+    library_loaded: bool,
     ready: bool,
     error: Option<String>,
     list_request: u64,
@@ -100,6 +107,7 @@ pub struct MusicApp {
     video_rect: Option<egui::Rect>,
     stream_check: Option<StreamCheck>,
     snapshot: Option<crate::preview::Snapshot>,
+    account_check: Option<AccountCheck>,
 }
 
 impl MusicApp {
@@ -162,6 +170,8 @@ impl MusicApp {
             preparation: String::new(),
             connecting: false,
             connected: false,
+            account_status: "Restoring the saved Google session…".into(),
+            library_loaded: false,
             ready: false,
             error: None,
             list_request: 0,
@@ -189,8 +199,13 @@ impl MusicApp {
                     selected: None,
                     stage: 0,
                     last_trace: 0,
+                    session_refreshed: false,
                 }),
             snapshot: crate::preview::Snapshot::new(),
+            account_check: crate::account::smoke_active().then(|| AccountCheck {
+                started: std::time::Instant::now(),
+                phase: 0,
+            }),
         };
         app.prepare_snapshot(ctx);
         app
@@ -224,6 +239,7 @@ impl MusicApp {
         self.now = self.tracks.first().cloned();
         self.playlists = crate::preview::playlists();
         self.connected = true;
+        self.account_status = "Google account connected · preview".into();
         self.ready = true;
         self.loading = false;
         self.discover_loading = false;
@@ -401,6 +417,9 @@ impl MusicApp {
 
     fn receive(&mut self, ctx: &egui::Context) {
         self.player.pump();
+        while let Ok(capture) = self.player.session_rx.try_recv() {
+            self.backend.send(Request::Captured(capture));
+        }
         if self.player.take_quit() {
             self.quit = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -408,13 +427,10 @@ impl MusicApp {
         while let Ok(response) = self.backend.rx.try_recv() {
             match response {
                 Response::Ready(connected) => {
-                    if self.connecting {
-                        self.player.send(PlayerCommand::Reload);
-                    }
                     self.connected = connected;
-                    self.connecting = false;
                     self.ready = true;
                     if connected {
+                        self.library_loaded = false;
                         self.backend.send(Request::Library);
                         self.history_loading = true;
                         self.backend.send(Request::History);
@@ -427,6 +443,9 @@ impl MusicApp {
                         self.backend.send(Request::Discover);
                     }
                 }
+                Response::CaptureSession(id) => self.player.capture_session(id),
+                Response::AccountStatus(status) => self.account_status = status,
+                Response::ConnectFinished => self.connecting = false,
                 Response::Tracks(id, result) if id == self.list_request => {
                     self.loading = false;
                     match result {
@@ -455,8 +474,14 @@ impl MusicApp {
                     }
                 }
                 Response::Library(result) => match result {
-                    Ok(playlists) => self.playlists = playlists,
-                    Err(message) => self.error = Some(message),
+                    Ok(playlists) => {
+                        self.playlists = playlists;
+                        self.library_loaded = true;
+                    }
+                    Err(message) => {
+                        self.error = Some(message);
+                        self.library_loaded = false;
+                    }
                 },
                 Response::Liked(id, liked, success) => {
                     if success {
@@ -481,7 +506,8 @@ impl MusicApp {
                         }
                     } else {
                         self.error = Some(
-                            "Couldn't update liked songs. Try reconnecting your account.".into(),
+                            "Couldn't update liked songs. Try again after the connection recovers."
+                                .into(),
                         );
                     }
                 }
@@ -710,17 +736,18 @@ impl MusicApp {
                     ui.add_space(10.);
                     if self.connected {
                         ui.label(
-                            RichText::new("●  Google account connected")
+                            RichText::new("●  Google account saved")
                                 .small()
                                 .color(ACCENT),
-                        );
+                        )
+                        .on_hover_text(&self.account_status);
                     } else if ui
                         .add_enabled(
                             !self.connecting,
                             egui::Button::new(if self.connecting {
                                 "Connecting…"
                             } else {
-                                "Connect Google"
+                                "Continue with Google"
                             }),
                         )
                         .clicked()
@@ -1226,7 +1253,7 @@ impl MusicApp {
                     .color(MUTED),
             );
             if ui
-                .add_enabled(!self.connecting, egui::Button::new("Connect Google"))
+                .add_enabled(!self.connecting, egui::Button::new("Continue with Google"))
                 .clicked()
             {
                 self.connecting = true;
@@ -1378,9 +1405,32 @@ impl MusicApp {
                 check.stage = 3;
             }
             3 if self.state.playing && self.state.position > 31. && !self.state.ad => {
-                self.video_mode = false;
-                self.player.send(PlayerCommand::Video(false));
-                check.stage = 4;
+                if self.connected && !check.session_refreshed {
+                    self.connecting = true;
+                    self.backend.send(Request::Connect);
+                    check.session_refreshed = true;
+                    check.stage = 6;
+                } else {
+                    self.video_mode = false;
+                    self.player.send(PlayerCommand::Video(false));
+                    check.stage = 4;
+                }
+            }
+            6 if !self.connecting
+                && self.account_status.starts_with("Google account connected") =>
+            {
+                if self.current != Some(0)
+                    || self.state.generation != 1
+                    || self.state.position < 31.
+                {
+                    eprintln!("Session refresh reset playback");
+                    crate::STREAM_CHECK_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.quit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+                println!("Session refreshed without resetting playback");
+                check.stage = 3;
             }
             4 if self.state.playing
                 && self.state.position > 32.
@@ -1424,6 +1474,46 @@ impl MusicApp {
             _ => {}
         }
         self.stream_check = Some(check);
+    }
+    fn check_account(&mut self, ctx: &egui::Context) {
+        let Some(check) = &mut self.account_check else {
+            return;
+        };
+        if check.phase == 2 {
+            return;
+        }
+        if check.started.elapsed() > Duration::from_secs(75)
+            || self.account_status.starts_with("Google requires sign-in")
+        {
+            eprintln!("Account restore check failed: {}", self.account_status);
+            crate::STREAM_CHECK_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.quit = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if self.connected
+            && self.library_loaded
+            && !self.history_loading
+            && self.account_status.starts_with("Google account connected")
+            && !self.connecting
+        {
+            if check.phase == 0 {
+                println!(
+                    "Saved account restored; {} playlists and {} recent tracks (names withheld)",
+                    self.playlists.len(),
+                    self.account_recent.len()
+                );
+                check.phase = 1;
+                self.connecting = true;
+                self.backend.send(Request::Connect);
+            } else {
+                check.phase = 2;
+                println!("Google account refreshed from the app profile without opening login");
+                self.quit = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
     fn expanded_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -1604,18 +1694,19 @@ impl MusicApp {
         ui.add_space(15.);
         ui.heading("Account");
         ui.add_space(8.);
-        ui.label(if self.connected {
-            "Your Google account is connected."
-        } else {
-            "Search and listen without an account, or connect your library."
-        });
+        ui.label(&self.account_status);
+        ui.label(RichText::new("Your saved account is restored automatically. Google sign-in opens only when needed.").small().color(MUTED));
         if ui
             .add_enabled(
                 !self.connecting,
                 egui::Button::new(if self.connecting {
                     "Connecting…"
                 } else {
-                    "Connect / reconnect Google"
+                    if self.connected {
+                        "Refresh connection"
+                    } else {
+                        "Continue with Google"
+                    }
                 }),
             )
             .clicked()
@@ -1625,6 +1716,7 @@ impl MusicApp {
         }
         if self.connected && ui.button("Disconnect native session").clicked() {
             self.backend.send(Request::Disconnect);
+            self.connecting = false;
             self.playlists.clear();
         }
         ui.add_space(28.);
@@ -1705,9 +1797,11 @@ impl eframe::App for MusicApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive(ctx);
         self.check_stream(ctx);
+        self.check_account(ctx);
         self.discord.update(
             self.preferences.discord_rpc.unwrap_or(true)
                 && !std::env::args().any(|arg| arg == "--smoke-stream")
+                && !crate::account::smoke_active()
                 && !crate::preview::active(),
             self.preferences
                 .discord_application_id
@@ -1831,7 +1925,10 @@ impl eframe::App for MusicApp {
         }
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        if std::env::args().any(|arg| arg == "--smoke-stream") || crate::preview::active() {
+        if std::env::args().any(|arg| arg == "--smoke-stream")
+            || crate::preview::active()
+            || crate::account::smoke_active()
+        {
             return;
         }
         self.preferences.volume = Some(self.volume);

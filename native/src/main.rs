@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod account;
 mod app;
 mod backend;
 mod catalog_ui;
@@ -25,7 +26,9 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    let smoke = std::env::args().any(|arg| arg == "--smoke-stream") || preview::active();
+    let smoke = std::env::args().any(|arg| arg == "--smoke-stream")
+        || account::smoke_active()
+        || preview::active();
     let instance = single_instance::SingleInstance::new("RustifiedYoutube-native")
         .expect("single instance mutex");
     if !smoke && !instance.is_single() {

@@ -3,12 +3,15 @@ use rustified_core::api::Catalog;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let authenticated = std::env::args().any(|arg| arg == "--authenticated");
-    let cookie = if authenticated {
-        rustified_core::session::load_cookie()?
+    let saved = if authenticated {
+        rustified_core::session::load_session()?
     } else {
         None
     };
-    let api = Catalog::new(cookie.as_deref()).await?;
+    let api = match saved.as_ref() {
+        Some(saved) => Catalog::from_session(saved).await?,
+        None => Catalog::new(None).await?,
+    };
     if authenticated {
         anyhow::ensure!(api.signed_in(), "No native account session");
         let recent = api.history().await?;
