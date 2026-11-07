@@ -7,6 +7,7 @@ mod catalog_ui;
 mod discord;
 mod fonts;
 mod icons;
+mod mixer;
 mod navigation;
 mod playback_session;
 mod player;

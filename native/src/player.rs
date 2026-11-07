@@ -114,6 +114,7 @@ fn playback_origin(uri: &str) -> bool {
 
 pub struct Player {
     webview: Option<WebView>,
+    mixer: Option<crate::mixer::Mixer>,
     _context: Option<WebContext>,
     incoming: Receiver<BridgeEvent>,
     updates: Sender<PlayerState>,
@@ -151,6 +152,7 @@ impl Player {
         let (session_tx, session_rx) = mpsc::channel();
         let mut result = Self {
             webview: None,
+            mixer: None,
             _context: None,
             incoming,
             updates,
@@ -252,6 +254,8 @@ impl Player {
         match build {
             Ok((webview, context)) => {
                 result.webview = Some(webview);
+                result.mixer = crate::mixer::Mixer::start();
+                result.sync_audio_identity();
                 result._context = Some(context);
             }
             Err(_) => {
@@ -259,6 +263,22 @@ impl Player {
             }
         }
         result
+    }
+    fn sync_audio_identity(&self) {
+        if let (Some(webview), Some(mixer)) = (&self.webview, &self.mixer) {
+            let _ = (|| -> windows::core::Result<()> {
+                let core = unsafe { webview.controller().CoreWebView2()? };
+                let mut browser = 0;
+                unsafe {
+                    core.BrowserProcessId(&mut browser)?;
+                }
+                mixer.set_browser(browser);
+                Ok(())
+            })();
+        }
+    }
+    pub fn mixer_verified(&self) -> bool {
+        self.mixer.as_ref().is_some_and(|mixer| mixer.verified())
     }
     pub fn is_ready(&self) -> bool {
         self.ready.get()
@@ -400,6 +420,7 @@ impl Player {
                         self.restoring.set(true);
                     }
                     self.ready.set(true);
+                    self.sync_audio_identity();
                     self.loading_since.set(None);
                     self.session_checked.set(Some(Instant::now()));
                     if rustified_core::session::native_enabled() {

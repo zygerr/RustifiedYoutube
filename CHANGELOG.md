@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.10
+
+- Label this player's Windows audio sessions as RustifiedYoutube and use the application's embedded icon in the volume mixer.
+- Identify sessions through the actual dedicated WebView2 browser process and its verified process tree, including browser creation-time checks to reject reused process IDs.
+- Refresh labels on active output devices in a background worker and retain session controls so names and icons survive while playback is paused.
+- Keep mixer volume, mute, and routing untouched; add a live check for the audio-session name, embedded icon resource, and unchanged volume/mute values.
+
 ## 0.3.9
 
 - Add native Windows taskbar thumbnail controls for Previous, Play/Pause, and Next, routed through the existing player and queue.

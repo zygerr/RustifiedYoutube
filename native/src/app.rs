@@ -1566,6 +1566,7 @@ impl MusicApp {
             1 if self.state.playing
                 && self.state.position > 0.3
                 && self.state.video_width > 0
+                && (!crate::mixer::smoke_active() || self.player.mixer_verified())
                 && !self.state.ad =>
             {
                 println!(
@@ -1574,6 +1575,15 @@ impl MusicApp {
                     self.state.video_width,
                     self.state.video_height
                 );
+                if crate::mixer::smoke_active() {
+                    println!(
+                        "Windows audio identity verified: RustifiedYoutube, application icon, volume and mute unchanged"
+                    );
+                    self.player.send(PlayerCommand::Stop);
+                    self.quit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
                 self.seek_to(30.);
                 assert_eq!(self.timeline.position(self.state.position), 30.);
                 self.smoke_toggle();
