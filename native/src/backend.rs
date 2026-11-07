@@ -16,6 +16,7 @@ pub enum Request {
     Playlist(u64, String),
     Library,
     History,
+    Discover,
     Connect,
     Disconnect,
     Like(String, bool),
@@ -27,6 +28,7 @@ pub enum Response {
     Tracks(u64, Result<Vec<Track>, String>),
     Library(Result<Vec<Playlist>, String>),
     History(Result<Vec<Track>, String>),
+    Discover(Result<Vec<Track>, String>),
     Liked(String, bool, bool),
     Cover(String, egui::ColorImage),
     Notice(String),
@@ -47,6 +49,9 @@ impl Backend {
     pub fn start(ctx: egui::Context) -> Self {
         let (tx, mut requests) = tokio::sync::mpsc::unbounded_channel();
         let (updates, rx) = mpsc::channel();
+        if crate::preview::active() {
+            return Self { tx, rx };
+        }
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -86,6 +91,11 @@ impl Backend {
                     }
                     let job = tokio::spawn(async move {
                         match request {
+                            Request::Discover => {
+                                let client=api.read().await.clone();
+                                let result=client.search("popular music").await.map_err(|_|"Couldn't load Discover. Try refreshing.".into());
+                                send(&updates,&ctx,Response::Discover(result));
+                            }
                             Request::Search(id, query, filter) => {
                                 let client = api.read().await.clone();
                                 let result = client.search_filtered(&query, filter).await.map_err(|_| "Search couldn't load. Check your connection and try again.".into());

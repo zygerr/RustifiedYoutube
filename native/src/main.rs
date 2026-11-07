@@ -1,10 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
 mod backend;
+mod catalog_ui;
 mod discord;
 mod fonts;
 mod icons;
 mod player;
+mod preview;
 mod queue;
 mod timeline;
 mod volume;
@@ -23,7 +25,7 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    let smoke = std::env::args().any(|arg| arg == "--smoke-stream");
+    let smoke = std::env::args().any(|arg| arg == "--smoke-stream") || preview::active();
     let instance = single_instance::SingleInstance::new("RustifiedYoutube-native")
         .expect("single instance mutex");
     if !smoke && !instance.is_single() {
@@ -51,11 +53,16 @@ fn main() -> eframe::Result {
     };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1440., 900.])
+            .with_inner_size(if preview::compact() {
+                [1080., 700.]
+            } else {
+                [1440., 900.]
+            })
             .with_min_inner_size([1080., 700.])
             .with_icon(icon),
         renderer: eframe::Renderer::Wgpu,
         persist_window: !smoke,
+        persistence_path: preview::storage_path(),
         ..Default::default()
     };
     let result = eframe::run_native(

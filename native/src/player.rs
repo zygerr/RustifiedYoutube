@@ -132,6 +132,9 @@ impl Player {
             last_playing: Cell::new(false),
             seek_revision: Cell::new(0),
         };
+        if crate::preview::active() {
+            return result;
+        }
         let build = (|| -> Result<_, Box<dyn std::error::Error>> {
             let mut context = WebContext::new(Some(rustified_core::session::profile_dir()?));
             let repaint = cc.egui_ctx.clone();

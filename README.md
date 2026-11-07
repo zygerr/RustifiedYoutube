@@ -4,6 +4,9 @@ An unofficial Windows x64 YouTube Music client. The interface, search, library, 
 
 ## Playback and interface
 
+- Browse a YouTube Music inspired native interface with dark surfaces, a persistent search field, mood filters, Listen again, Quick picks, and Discover more.
+- See consistently sized artwork: 180 px square catalog cards and 48 px covers in 64 px song rows. Wide video thumbnails are center-cropped instead of changing the layout or stretching. Long titles truncate within fixed card dimensions.
+
 - Start streaming without downloading and remuxing an entire track first. The YouTube engine warms up when the app opens and stays alive between tracks. Actual startup time still depends on YouTube, the connection, and any normal playback restrictions.
 - Click the current song or artwork in the bottom-left player bar to open the expanded player.
 - The bottom song information, controls, and seek rail stay in the same position when opening or closing the expanded player.
@@ -68,6 +71,15 @@ cargo run -p rustified-core --example smoke -- --authenticated
 The streaming check opens a temporary app instance with volume zero, measures two real streams, verifies video dimensions, pause, seek confirmation, and Audio/Video switching, then closes. It does not change saved UI preferences. Unit tests cover full title and history parsing, artist ranking, styled-title glyph coverage, volume wheel interaction, seek interaction and width, shuffle order, and media bridge restrictions.
 
 The RPC check verifies the real Discord handshake and acknowledgement of a clear-activity command without displaying a test song. Unit tests also cover presence timestamps, pause/ad clearing, Unicode limits, fragmented IPC frames, pings, and immediate volume protection.
+
+Debug builds also support offline visual snapshots:
+
+```powershell
+./target/debug/RustifiedYoutube.exe --ui-snapshot discover
+./target/debug/RustifiedYoutube.exe --ui-snapshot library --compact
+```
+
+Supported pages are `discover`, `library`, `search`, `queue`, `player`, and `settings`. Snapshots use synthetic artwork and catalog fixtures, skip metadata/account/media connections and Discord sharing, and save PNGs plus isolated test preferences under `target/ui-preview/`. The normal snapshot window is 1440 × 900; `--compact` uses 1080 × 700. The app closes after capture. This mode is disabled in release builds.
 
 ## Releases
 

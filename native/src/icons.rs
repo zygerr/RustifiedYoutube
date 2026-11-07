@@ -15,6 +15,7 @@ pub enum Icon {
     Plus,
     Repeat,
     Shuffle,
+    Search,
 }
 
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color32) {
@@ -23,6 +24,10 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color3
     let stroke = Stroke::new(1.7_f32, color);
     let line = |a, b| painter.line_segment([a, b], stroke);
     match icon {
+        Icon::Search => {
+            painter.circle_stroke(point(-2., -2.), 6., stroke);
+            line(point(3., 3.), point(8., 8.));
+        }
         Icon::Play => {
             painter.add(egui::Shape::convex_polygon(
                 vec![point(-5., -8.), point(8., 0.), point(-5., 8.)],
@@ -155,7 +160,7 @@ pub fn button(
         ui.painter().circle_filled(
             rect.center(),
             size / 2. - 1.,
-            Color32::from_rgb(244, 148, 114),
+            Color32::from_rgb(241, 241, 241),
         );
     } else if response.hovered() {
         ui.painter()
@@ -166,7 +171,7 @@ pub fn button(
         rect,
         icon,
         if accent {
-            Color32::from_rgb(24, 18, 16)
+            Color32::from_rgb(3, 3, 3)
         } else {
             ui.visuals().text_color()
         },

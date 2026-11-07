@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.3
+
+- Restyle the native interface around YouTube Music's black surfaces, white typography and playback controls, red seek progress, search field, mood chips, and content shelves.
+- Rebuild Discover as a single scrolling page with Listen again, a responsive Quick picks section, and Discover more.
+- Keep Discover recommendations separate from search results when navigating between pages.
+- Share fixed 180 px square artwork cards across Discover and Library, with bounded title/subtitle areas and responsive library columns.
+- Share 48 px artwork and 64 px song rows across search, playlists, the queue, Quick picks, and the expanded player's upcoming queue.
+- Center-crop wide and portrait thumbnails without stretching; loading placeholders occupy the same space as loaded artwork.
+- Add offline fixture snapshots for visual inspection at 1440 × 900 and 1080 × 700, plus layout/cropping and row-action regression checks.
+
 ## 0.3.2
 
 - Add native Discord Rich Presence with the current song, artist, artwork, playback timestamps, and a YouTube Music link; reconnect automatically when Discord starts again.

@@ -120,7 +120,7 @@ impl Timeline {
         ui.painter()
             .rect_filled(rail, 2.0, Color32::from_rgb(56, 61, 72));
         if enabled {
-            let accent = Color32::from_rgb(244, 148, 114);
+            let accent = Color32::from_rgb(255, 0, 51);
             let end = rail.left() + fraction * rail.width();
             ui.painter().rect_filled(
                 egui::Rect::from_min_max(rail.min, egui::pos2(end, rail.bottom())),
