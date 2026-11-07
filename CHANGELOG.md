@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.12
+
+- Center search text and its placeholder vertically with the search icon.
+
 ## 0.3.11
 
 - Supply the Windows volume mixer with a standalone application ICO in persistent app data, avoiding executable resource locators that some mixer surfaces fail to display.

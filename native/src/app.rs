@@ -1933,6 +1933,7 @@ impl MusicApp {
                             egui::TextEdit::singleline(&mut self.query)
                                 .frame(false)
                                 .font(egui::TextStyle::Body)
+                                .vertical_align(Align::Center)
                                 .hint_text("Search songs, albums, artists…"),
                         );
                         if response.lost_focus()
