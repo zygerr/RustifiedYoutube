@@ -26,4 +26,5 @@ reqwest = { version = "0.13", default-features = false, features = ["native-tls"
 tray-icon = "0.25"
 muda = "0.20"
 single-instance = "0.3"
-windows = { version = "0.62", features = ["Foundation", "Media", "Media_Core", "Media_Playback", "Win32_System_WinRT", "Win32_UI_WindowsAndMessaging"] }
+wry = "0.57"
+windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging"] }

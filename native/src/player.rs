@@ -1,259 +1,371 @@
 use eframe::egui;
+use serde::Deserialize;
+use serde_json::{Value, json};
 use std::{
+    cell::{Cell, RefCell},
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };
-use windows::{
-    Foundation::{TimeSpan, TypedEventHandler, Uri},
-    Media::{
-        Core::MediaSource,
-        Playback::{
-            MediaPlaybackState, MediaPlayer, MediaPlayerAudioCategory, MediaPlayerFailedEventArgs,
-        },
-    },
-    Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize},
-    core::HSTRING,
-};
+use wry::{WebContext, WebView, WebViewBuilder, WebViewBuilderExtWindows};
+
+pub const BROWSER_ARGS: &str = "--autoplay-policy=no-user-gesture-required";
 
 pub enum PlayerCommand {
-    Play {
-        generation: u64,
-        audio: rustified_core::resolver::PreparedAudio,
-    },
+    Play { generation: u64, video_id: String },
     Toggle,
     Volume(f64),
     Seek(f64),
     Stop,
-    Shutdown,
+    Reload,
+    Video(bool),
 }
-
 #[derive(Default, Clone, PartialEq)]
 pub struct PlayerState {
+    pub title: String,
+    pub transition: bool,
     pub generation: u64,
     pub position: f64,
     pub duration: f64,
     pub playing: bool,
     pub buffering: bool,
     pub ended: bool,
+    pub ad: bool,
+    pub video_width: u32,
+    pub video_height: u32,
+    pub video_available: bool,
     pub error: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum BridgeEvent {
+    Ready,
+    Trace {
+        phase: TracePhase,
+        position: f64,
+        target: Option<f64>,
+        video: bool,
+    },
+    Shortcut {
+        action: Shortcut,
+    },
+    State {
+        title: String,
+        transition: bool,
+        generation: u64,
+        video_id: String,
+        position: f64,
+        duration: f64,
+        playing: bool,
+        buffering: bool,
+        ended: bool,
+        ad: bool,
+        video_width: u32,
+        video_height: u32,
+        video_available: bool,
+        error: Option<String>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Shortcut {
+    Toggle,
+    Quit,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "snake_case")]
+enum TracePhase {
+    ModeStarted,
+    ModeSettled,
+    SeekQueued,
+    SeekApplied,
+}
+
+fn playback_origin(uri: &str) -> bool {
+    reqwest::Url::parse(uri)
+        .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("music.youtube.com"))
 }
 
 pub struct Player {
-    pub tx: Sender<PlayerCommand>,
+    webview: Option<WebView>,
+    _context: Option<WebContext>,
+    incoming: Receiver<BridgeEvent>,
+    updates: Sender<PlayerState>,
     pub rx: Receiver<PlayerState>,
-    worker: Option<std::thread::JoinHandle<()>>,
+    ready: Cell<bool>,
+    pending: RefCell<Vec<Value>>,
+    generation: Cell<u64>,
+    requested: Cell<Option<Instant>>,
+    volume: Cell<f64>,
+    video: Cell<bool>,
+    last_bounds: Cell<Option<[i32; 4]>>,
+    quit_requested: Cell<bool>,
+    current_video: RefCell<Option<String>>,
+    last_playing: Cell<bool>,
 }
 impl Player {
-    pub fn start(ctx: egui::Context) -> Self {
-        let (tx, commands) = mpsc::channel();
+    pub fn start(cc: &eframe::CreationContext<'_>) -> Self {
+        let (events, incoming) = mpsc::channel();
         let (updates, rx) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            if run(commands, &updates, &ctx).is_err() {
-                let _ = updates.send(PlayerState {
-                    error: Some(
-                        "Windows audio could not start. Check your audio output device.".into(),
-                    ),
-                    ..Default::default()
-                });
-                ctx.request_repaint();
-            }
-        });
-        Self {
-            tx,
+        let mut result = Self {
+            webview: None,
+            _context: None,
+            incoming,
+            updates,
             rx,
-            worker: Some(worker),
+            ready: Cell::new(false),
+            pending: RefCell::new(Vec::new()),
+            generation: Cell::new(0),
+            requested: Cell::new(None),
+            volume: Cell::new(0.5),
+            video: Cell::new(false),
+            last_bounds: Cell::new(None),
+            quit_requested: Cell::new(false),
+            current_video: RefCell::new(None),
+            last_playing: Cell::new(false),
+        };
+        let build = (|| -> Result<_, Box<dyn std::error::Error>> {
+            let mut context = WebContext::new(Some(rustified_core::session::profile_dir()?));
+            let repaint = cc.egui_ctx.clone();
+            let webview = WebViewBuilder::new_with_web_context(&mut context)
+                .with_additional_browser_args(BROWSER_ARGS)
+                .with_browser_accelerator_keys(false)
+                .with_default_context_menus(false)
+                .with_background_color((0, 0, 0, 255))
+                .with_bounds(wry::Rect {
+                    position: wry::dpi::PhysicalPosition::new(-200, -200).into(),
+                    size: wry::dpi::PhysicalSize::new(160, 90).into(),
+                })
+                .with_initialization_script(include_str!("media_bridge.js"))
+                .with_ipc_handler(move |request| {
+                    if !playback_origin(&request.uri().to_string()) || request.body().len() > 16384
+                    {
+                        return;
+                    }
+                    if let Ok(event) = serde_json::from_str::<BridgeEvent>(request.body()) {
+                        let _ = events.send(event);
+                        repaint.request_repaint();
+                    }
+                })
+                .with_navigation_handler(|url| url == "about:blank" || playback_origin(&url))
+                .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
+                .with_url("https://music.youtube.com/")
+                .build_as_child(cc)?;
+            Ok((webview, context))
+        })();
+        match build {
+            Ok((webview, context)) => {
+                result.webview = Some(webview);
+                result._context = Some(context);
+            }
+            Err(_) => {
+                let _ = result.updates.send(PlayerState { error:Some("The YouTube playback engine could not start. Install Microsoft WebView2 Runtime and restart RustifiedYoutube.".into()),..Default::default() });
+            }
+        }
+        result
+    }
+    pub fn is_ready(&self) -> bool {
+        self.ready.get()
+    }
+    pub fn take_quit(&self) -> bool {
+        self.quit_requested.replace(false)
+    }
+    pub fn pump(&self) {
+        while let Ok(event) = self.incoming.try_recv() {
+            match event {
+                BridgeEvent::Shortcut {
+                    action: Shortcut::Toggle,
+                } => self.send(PlayerCommand::Toggle),
+                BridgeEvent::Shortcut {
+                    action: Shortcut::Quit,
+                } => self.quit_requested.set(true),
+                BridgeEvent::Ready => {
+                    self.ready.set(true);
+                    if std::env::args().any(|arg| arg == "--smoke-stream") {
+                        self.eval(&json!({"op":"diagnostic"}));
+                    }
+                    self.eval(&json!({"op":"volume","value":self.volume.get()}));
+                    self.eval(&json!({"op":"mode","video":self.video.get()}));
+                    for command in self.pending.borrow_mut().drain(..) {
+                        self.eval(&command);
+                    }
+                }
+                BridgeEvent::Trace {
+                    phase,
+                    position,
+                    target,
+                    video,
+                } => {
+                    if std::env::args().any(|arg| arg == "--smoke-stream") {
+                        println!(
+                            "Media trace: {phase:?}, position {position:.2}, seek {target:?}, video {video}"
+                        );
+                    }
+                }
+                BridgeEvent::State {
+                    title,
+                    transition,
+                    generation,
+                    video_id,
+                    position,
+                    duration,
+                    playing,
+                    buffering,
+                    ended,
+                    ad,
+                    video_width,
+                    video_height,
+                    video_available,
+                    error,
+                } => {
+                    if generation != self.generation.get()
+                        || !position.is_finite()
+                        || !duration.is_finite()
+                        || position < 0.0
+                        || duration < 0.0
+                    {
+                        continue;
+                    }
+                    if !video_id.is_empty() && !rustified_core::model::valid_video_id(&video_id) {
+                        continue;
+                    }
+                    if playing || error.is_some() || (!buffering && duration > 0.) {
+                        self.requested.set(None);
+                    }
+                    self.last_playing.set(playing);
+                    let _ = self.updates.send(PlayerState {
+                        title,
+                        transition,
+                        generation,
+                        position,
+                        duration,
+                        playing,
+                        buffering,
+                        ended,
+                        ad,
+                        video_width,
+                        video_height,
+                        video_available,
+                        error,
+                    });
+                }
+            }
+        }
+        if self
+            .requested
+            .get()
+            .is_some_and(|started| started.elapsed() > Duration::from_secs(40))
+        {
+            self.requested.set(None);
+            let _ = self.updates.send(PlayerState { generation:self.generation.get(),error:Some("YouTube did not start this track. Use Connect Google to refresh your account, then try again.".into()),..Default::default() });
+        }
+    }
+    fn eval(&self, command: &Value) {
+        if let Some(webview) = &self.webview {
+            let _ =
+                webview.evaluate_script(&format!("window.__rustifiedMedia?.command({command});"));
         }
     }
     pub fn send(&self, command: PlayerCommand) {
-        let _ = self.tx.send(command);
-    }
-}
-impl Drop for Player {
-    fn drop(&mut self) {
-        self.send(PlayerCommand::Shutdown);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-enum MediaEvent {
-    Ended(u64),
-    Failed(u64, String),
-}
-
-fn create_player(
-    generation: u64,
-    volume: f64,
-    events: Sender<MediaEvent>,
-) -> windows::core::Result<MediaPlayer> {
-    let player = MediaPlayer::new()?;
-    player.SetAudioCategory(MediaPlayerAudioCategory::Media)?;
-    player.SetIsMuted(false)?;
-    player.SetVolume(volume)?;
-    let ended = events.clone();
-    player.MediaEnded(&TypedEventHandler::new(move |_, _| {
-        let _ = ended.send(MediaEvent::Ended(generation));
-        Ok(())
-    }))?;
-    player.MediaFailed(
-        &TypedEventHandler::<MediaPlayer, MediaPlayerFailedEventArgs>::new(move |_, args| {
-            let detail = args
-                .as_ref()
-                .and_then(|args| args.ExtendedErrorCode().ok())
-                .map(|code| format!("Windows audio error {code:?}."))
-                .unwrap_or_else(|| "Windows could not decode this track.".into());
-            let _ = events.send(MediaEvent::Failed(generation, detail));
-            Ok(())
-        }),
-    )?;
-    Ok(player)
-}
-
-fn natural_end(last_position: f64, duration: f64) -> bool {
-    last_position > 0.5 && duration > 0.0 && last_position >= duration - 3.0
-}
-
-fn run(
-    commands: Receiver<PlayerCommand>,
-    updates: &Sender<PlayerState>,
-    ctx: &egui::Context,
-) -> windows::core::Result<()> {
-    unsafe {
-        RoInitialize(RO_INIT_MULTITHREADED)?;
-    }
-    let (events, notifications) = mpsc::channel();
-    let mut volume = 0.5;
-    let mut generation = 0;
-    let mut player = create_player(generation, volume, events.clone())?;
-    let mut current_audio = None;
-    let mut active = false;
-    let mut last_sent: Option<PlayerState> = None;
-    let mut last_position = 0.0;
-    let mut opened_at = Instant::now();
-    loop {
-        match commands.recv_timeout(Duration::from_millis(250)) {
-            Ok(PlayerCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Ok(PlayerCommand::Play {
-                generation: id,
-                audio,
-            }) => {
-                // Each source gets its own event handlers. Late events from the
-                // previous source retain its generation and cannot skip this song.
-                let _ = player.Close();
-                generation = id;
-                player = create_player(generation, volume, events.clone())?;
-                current_audio = Some(audio);
-                last_position = 0.0;
-                last_sent = None;
-                opened_at = Instant::now();
-                let result = (|| {
-                    let audio = current_audio.as_ref().expect("current audio");
-                    let source =
-                        MediaSource::CreateFromUri(&Uri::CreateUri(&HSTRING::from(&audio.url))?)?;
-                    player.SetSource(&source)?;
-                    player.Play()
-                })();
-                active = true;
-                if let Err(error) = result {
-                    let _ = events.send(MediaEvent::Failed(
-                        generation,
-                        format!("Windows audio error {:?}.", error.code()),
-                    ));
+        let message = match command {
+            PlayerCommand::Play {
+                generation,
+                video_id,
+            } => {
+                if !rustified_core::model::valid_video_id(&video_id) {
+                    return;
                 }
+                self.generation.set(generation);
+                self.current_video.replace(Some(video_id.clone()));
+                self.requested.set(Some(Instant::now()));
+                self.pending.borrow_mut().clear();
+                json!({"op":"play","generation":generation,"id":video_id})
             }
-            Ok(PlayerCommand::Stop) => {
-                active = false;
-                generation = 0;
-                let _ = player.Close();
-                current_audio = None;
-                player = create_player(generation, volume, events.clone())?;
+            PlayerCommand::Toggle => json!({"op":"toggle"}),
+            PlayerCommand::Stop => {
+                self.requested.set(None);
+                json!({"op":"pause"})
             }
-            Ok(PlayerCommand::Toggle) if active => {
-                if player.PlaybackSession()?.PlaybackState()? == MediaPlaybackState::Playing {
-                    player.Pause()?;
-                } else {
-                    player.Play()?;
+            PlayerCommand::Volume(value) => {
+                self.volume.set(value.clamp(0.0, 1.0));
+                json!({"op":"volume","value":self.volume.get()})
+            }
+            PlayerCommand::Seek(value) => json!({"op":"seek","value":value.max(0.0)}),
+            PlayerCommand::Video(video) => {
+                self.video.set(video);
+                json!({"op":"mode","video":video})
+            }
+            PlayerCommand::Reload => {
+                self.ready.set(false);
+                self.pending.borrow_mut().clear();
+                if let Some(id) = self.current_video.borrow().as_ref() {
+                    self.pending.borrow_mut().push(json!({"op":"play","id":id,"generation":self.generation.get(),"paused":!self.last_playing.get()}));
                 }
-            }
-            Ok(PlayerCommand::Volume(value)) => {
-                volume = value.clamp(0.0, 1.0);
-                player.SetVolume(volume)?;
-            }
-            Ok(PlayerCommand::Seek(seconds)) if active => {
-                let seconds = seconds.max(0.0);
-                player.PlaybackSession()?.SetPosition(TimeSpan {
-                    Duration: (seconds * 10_000_000.0) as i64,
-                })?;
-                last_position = seconds;
-            }
-            Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        let mut ended = false;
-        let mut error = None;
-        while let Ok(event) = notifications.try_recv() {
-            match event {
-                MediaEvent::Ended(id) if id == generation && active => ended = true,
-                MediaEvent::Failed(id, detail) if id == generation && active => {
-                    error = Some(detail)
+                if let Some(webview) = &self.webview {
+                    let _ = webview.reload();
                 }
-                _ => {}
+                return;
             }
-        }
-        if !active {
-            continue;
-        }
-        let session = player.PlaybackSession()?;
-        let state = session.PlaybackState()?;
-        let position = session.Position()?.Duration as f64 / 10_000_000.0;
-        let duration = session.NaturalDuration()?.Duration as f64 / 10_000_000.0;
-        if ended && !natural_end(last_position, duration) {
-            ended = false;
-            error = Some("This track stopped before playback completed. Try playing it again or choose another result.".into());
-        }
-        let buffering =
-            state == MediaPlaybackState::Buffering || state == MediaPlaybackState::Opening;
-        if buffering && opened_at.elapsed() > Duration::from_secs(30) && position < 0.5 {
-            error = Some(
-                "Windows could not start this track within 30 seconds. Try playing it again."
-                    .into(),
-            );
-        }
-        let update = PlayerState {
-            generation,
-            position,
-            duration,
-            playing: state == MediaPlaybackState::Playing && error.is_none(),
-            buffering: buffering && error.is_none(),
-            ended,
-            error,
         };
-        if last_sent.as_ref() != Some(&update) {
-            let _ = updates.send(update.clone());
-            last_sent = Some(update.clone());
-            ctx.request_repaint();
-        }
-        last_position = position;
-        if update.ended || update.error.is_some() {
-            active = false;
-            let _ = player.Pause();
+        if self.ready.get() {
+            self.eval(&message);
+        } else {
+            self.pending.borrow_mut().push(message);
         }
     }
-    let _ = player.Close();
-    drop(player);
-    drop(current_audio);
-    unsafe {
-        RoUninitialize();
+    pub fn place_video(&self, rect: Option<egui::Rect>, pixels_per_point: f32) {
+        let bounds = rect
+            .map(|rect| {
+                [
+                    (rect.left() * pixels_per_point).round() as i32,
+                    (rect.top() * pixels_per_point).round() as i32,
+                    (rect.width() * pixels_per_point).round().max(1.0) as i32,
+                    (rect.height() * pixels_per_point).round().max(1.0) as i32,
+                ]
+            })
+            .unwrap_or([-200, -200, 160, 90]);
+        if self.last_bounds.get() == Some(bounds) {
+            return;
+        }
+        self.last_bounds.set(Some(bounds));
+        if let Some(webview) = &self.webview {
+            let _ = webview.set_bounds(wry::Rect {
+                position: wry::dpi::PhysicalPosition::new(bounds[0], bounds[1]).into(),
+                size: wry::dpi::PhysicalSize::new(bounds[2] as u32, bounds[3] as u32).into(),
+            });
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn immediate_eof_does_not_advance_the_queue() {
-        assert!(!super::natural_end(0.0, 207.57));
-        assert!(!super::natural_end(1.0, 207.57));
-        assert!(super::natural_end(207.2, 207.57));
+    fn bridge_accepts_only_the_exact_music_origin() {
+        assert!(super::playback_origin(
+            "https://music.youtube.com/watch?v=Fixture0001"
+        ));
+        for url in [
+            "http://music.youtube.com/",
+            "https://music.youtube.com.example.org/",
+            "https://accounts.google.com/",
+            "file:///C:/test",
+            "https://music.youtube.com@evil.example/",
+        ] {
+            assert!(!super::playback_origin(url));
+        }
+    }
+    #[test]
+    fn bridge_rejects_unknown_commands_and_non_finite_positions() {
+        assert!(
+            serde_json::from_str::<super::BridgeEvent>(
+                r#"{"type":"shortcut","action":"launch_process"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<super::BridgeEvent>(r#"{"type":"state","position":NaN}"#)
+                .is_err()
+        );
     }
 }

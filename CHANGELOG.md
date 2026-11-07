@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+- Replace full-track fetching/remuxing with the persistent official YouTube Music streaming engine, hosted by WebView2 inside the Rust application.
+- Keep search, library, settings, controls, and the queue in egui; show only the video surface when Video mode is selected.
+- Open an expanded player by clicking the current song/artwork in the bottom-left corner, with Audio/Video switching and an upcoming queue on the right.
+- Load Windows symbol, math, and emoji fallback fonts to render styled Unicode titles, including a supplied sample title.
+- Retain configurable volume wheel steps, tray playback, version display, and native queue navigation.
+- Remove yt-dlp, Node.js, FFmpeg, full audio buffers, and the former prefetch/cache pipeline from the application package.
+- Add a real streaming check for startup latency, video, pause, seek, and Audio/Video switching.
+
 ## 0.2.2
 
 - Reduce audio extraction requests, with fallback to the compatible extraction path when needed.

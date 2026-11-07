@@ -2,7 +2,7 @@ use eframe::egui;
 use rustified_core::{
     api::Catalog,
     model::{Playlist, SearchFilter, Track},
-    resolver, session,
+    session,
 };
 use std::{
     collections::HashMap,
@@ -15,8 +15,6 @@ pub enum Request {
     Search(u64, String, SearchFilter),
     Playlist(u64, String),
     Library,
-    Resolve(u64, String),
-    Prefetch(Option<String>),
     Connect,
     Disconnect,
     Like(String, bool),
@@ -27,9 +25,6 @@ pub enum Response {
     Ready(bool),
     Tracks(u64, Result<Vec<Track>, String>),
     Library(Result<Vec<Playlist>, String>),
-    Stream(u64, Result<resolver::PreparedAudio, String>),
-    Preparing(u64, String),
-    Preloaded(String),
     Liked(String, bool, bool),
     Cover(String, egui::ColorImage),
     Notice(String),
@@ -72,18 +67,11 @@ impl Backend {
                 let signed_in = client.signed_in();
                 let api = Arc::new(RwLock::new(Arc::new(client)));
                 let cookie = Arc::new(RwLock::new(cookie));
-                let audio = crate::audio_loader::spawn(cookie.read().await.clone(), updates.clone(), ctx.clone());
                 send(&updates, &ctx, Response::Ready(signed_in));
                 let http = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().expect("image client");
                 let images = Arc::new(Semaphore::new(4));
                 let mut search_jobs: HashMap<u64, tokio::task::JoinHandle<()>> = HashMap::new();
                 while let Some(request) = requests.recv().await {
-                    let request = match request {
-                        Request::Resolve(id, video) => { let _ = audio.send(crate::audio_loader::Request::Play(id,video)); continue; },
-                        Request::Prefetch(video) => { let _ = audio.send(crate::audio_loader::Request::Prefetch(video)); continue; },
-                        request => request,
-                    };
-                    let audio = audio.clone();
                     let api = api.clone();
                     let cookie = cookie.clone();
                     let updates = updates.clone();
@@ -111,7 +99,6 @@ impl Backend {
                                 let result = client.library().await.map_err(|_| "Your library couldn't load. Connect or reconnect your Google account.".into());
                                 send(&updates, &ctx, Response::Library(result));
                             }
-                            Request::Resolve(..) | Request::Prefetch(..) => unreachable!("audio requests handled by loader"),
                             Request::Like(id, liked) => {
                                 let client = api.read().await.clone();
                                 let success = client.like(&id, liked).await.is_ok();
@@ -123,7 +110,6 @@ impl Backend {
                                     && let Ok(Some(new_cookie)) = session::load_cookie()
                                         && let Ok(client) = Catalog::new(Some(&new_cookie)).await {
                                             *api.write().await = Arc::new(client);
-                                            let _ = audio.send(crate::audio_loader::Request::Session(Some(new_cookie.clone())));
                                             *cookie.write().await = Some(new_cookie);
                                             send(&updates, &ctx, Response::Ready(true));
                                             return;
@@ -135,7 +121,6 @@ impl Backend {
                                     && let Ok(client) = Catalog::new(None).await {
                                         *api.write().await = Arc::new(client);
                                         *cookie.write().await = None;
-                                        let _ = audio.send(crate::audio_loader::Request::Session(None));
                                         send(&updates, &ctx, Response::Ready(false));
                                     }
                             }

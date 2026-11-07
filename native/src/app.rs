@@ -36,6 +36,13 @@ struct Preferences {
     volume_scroll_step: Option<u8>,
 }
 
+struct StreamCheck {
+    started: std::time::Instant,
+    selected: Option<std::time::Instant>,
+    stage: u8,
+    last_trace: u64,
+}
+
 enum TrayAction {
     Show,
     Toggle,
@@ -78,11 +85,16 @@ pub struct MusicApp {
     about: bool,
     seeking: bool,
     seek_position: f64,
+    expanded: bool,
+    video_mode: bool,
+    video_rect: Option<egui::Rect>,
+    stream_check: Option<StreamCheck>,
 }
 
 impl MusicApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
+        crate::fonts::install(ctx);
         let mut style = (*ctx.style()).clone();
         style.visuals = egui::Visuals::dark();
         style.visuals.panel_fill = BG;
@@ -108,7 +120,7 @@ impl MusicApp {
         let volume = preferences.volume.unwrap_or(0.5);
         let (tray_tx, tray_rx) = mpsc::channel();
         let tray = Self::create_tray(ctx.clone(), tray_tx).ok();
-        let player = Player::start(ctx.clone());
+        let player = Player::start(cc);
         player.send(PlayerCommand::Volume(volume as f64));
         Self {
             backend: Backend::start(ctx.clone()),
@@ -144,6 +156,17 @@ impl MusicApp {
             about: false,
             seeking: false,
             seek_position: 0.,
+            expanded: false,
+            video_mode: false,
+            video_rect: None,
+            stream_check: std::env::args()
+                .any(|arg| arg == "--smoke-stream")
+                .then(|| StreamCheck {
+                    started: std::time::Instant::now(),
+                    selected: None,
+                    stage: 0,
+                    last_trace: 0,
+                }),
         }
     }
 
@@ -210,6 +233,7 @@ impl MusicApp {
             return;
         }
         self.list_request += 1;
+        self.expanded = false;
         self.loading = true;
         self.error = None;
         self.page = Page::Tracks(format!("Results for “{}”", query.trim()));
@@ -221,6 +245,7 @@ impl MusicApp {
     }
 
     fn playlist(&mut self, id: String, title: String) {
+        self.expanded = false;
         self.list_request += 1;
         self.loading = true;
         self.error = None;
@@ -235,16 +260,21 @@ impl MusicApp {
         self.current = Some(index);
         self.now = Some(track.clone());
         self.play_request += 1;
-        self.resolving = true;
-        self.preparation = "Preparing audio…".into();
+        if let Some(check) = &mut self.stream_check {
+            check.selected = Some(std::time::Instant::now());
+        }
+        self.resolving = false;
+        self.preparation = "Starting YouTube stream…".into();
         self.seeking = false;
         self.seek_position = 0.;
         self.state = PlayerState::default();
         self.error = None;
         self.player.send(PlayerCommand::Stop);
-        self.backend
-            .send(Request::Resolve(self.play_request, track.id.clone()));
-        self.prefetch_next();
+        self.state.buffering = true;
+        self.player.send(PlayerCommand::Play {
+            generation: self.play_request,
+            video_id: track.id.clone(),
+        });
         self.preferences.recent.retain(|item| item.id != track.id);
         self.preferences.recent.insert(0, track);
         self.preferences.recent.truncate(30);
@@ -260,20 +290,6 @@ impl MusicApp {
         }
     }
 
-    fn prefetch_next(&self) {
-        let next = self
-            .current
-            .and_then(|index| self.queue.get(index + 1))
-            .or_else(|| {
-                if self.repeat {
-                    self.queue.first()
-                } else {
-                    None
-                }
-            });
-        self.backend
-            .send(Request::Prefetch(next.map(|track| track.id.clone())));
-    }
     fn previous(&mut self) {
         if self.state.position > 3. {
             self.player.send(PlayerCommand::Seek(0.));
@@ -283,9 +299,17 @@ impl MusicApp {
     }
 
     fn receive(&mut self, ctx: &egui::Context) {
+        self.player.pump();
+        if self.player.take_quit() {
+            self.quit = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         while let Ok(response) = self.backend.rx.try_recv() {
             match response {
                 Response::Ready(connected) => {
+                    if self.connecting {
+                        self.player.send(PlayerCommand::Reload);
+                    }
                     self.connected = connected;
                     self.connecting = false;
                     self.ready = true;
@@ -312,19 +336,6 @@ impl MusicApp {
                     Ok(playlists) => self.playlists = playlists,
                     Err(message) => self.error = Some(message),
                 },
-                Response::Stream(id, result) if id == self.play_request => {
-                    self.resolving = false;
-                    match result {
-                        Ok(audio) => self.player.send(PlayerCommand::Play {
-                            generation: id,
-                            audio,
-                        }),
-                        Err(message) => self.error = Some(message),
-                    }
-                }
-                Response::Preparing(id, message) if id == self.play_request => {
-                    self.preparation = message
-                }
                 Response::Liked(id, liked, success) => {
                     if success {
                         for track in self
@@ -480,6 +491,7 @@ impl MusicApp {
                 ui.add_space(32.);
                 if Self::nav(ui, "Discover", Icon::Home, self.page == Page::Discover) {
                     self.page = Page::Discover;
+                    self.expanded = false;
                 }
                 if Self::nav(
                     ui,
@@ -488,6 +500,7 @@ impl MusicApp {
                     self.page == Page::Library,
                 ) {
                     self.page = Page::Library;
+                    self.expanded = false;
                     if self.connected {
                         self.backend.send(Request::Library);
                     }
@@ -502,6 +515,7 @@ impl MusicApp {
                 }
                 if Self::nav(ui, "Play queue", Icon::Queue, self.page == Page::Queue) {
                     self.page = Page::Queue;
+                    self.expanded = false;
                 }
                 ui.add_space(24.);
                 ui.label(
@@ -552,6 +566,7 @@ impl MusicApp {
                     }
                     if Self::nav(ui, "Settings", Icon::Settings, self.page == Page::Settings) {
                         self.page = Page::Settings;
+                        self.expanded = false;
                     }
                     ui.add_space(10.);
                     if self.connected {
@@ -588,7 +603,7 @@ impl MusicApp {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
+                    let now_card = ui.allocate_ui_with_layout(
                         Vec2::new((ui.available_width() * 0.31).max(230.), 72.),
                         Layout::left_to_right(Align::Center),
                         |ui| {
@@ -612,12 +627,26 @@ impl MusicApp {
                             }
                         },
                     );
+                    let expand = now_card
+                        .response
+                        .interact(Sense::click())
+                        .on_hover_text("Open expanded player");
+                    expand.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            true,
+                            "Open expanded player",
+                        )
+                    });
+                    if expand.clicked() && self.now.is_some() {
+                        self.expanded = !self.expanded;
+                    }
                     ui.allocate_ui_with_layout(
                         Vec2::new((ui.available_width() - 240.).max(260.), 78.),
                         Layout::top_down(Align::Center),
                         |ui| {
                             ui.horizontal(|ui| {
-                                ui.add_space((ui.available_width() - 170.) / 2.);
+                                ui.add_space(((ui.available_width() - 170.) / 2.).max(0.));
                                 if icons::button(ui, Icon::Previous, "Previous track", 36., false)
                                     .clicked()
                                 {
@@ -653,7 +682,6 @@ impl MusicApp {
                                     icons::button(ui, Icon::Repeat, "Repeat queue", 30., false);
                                 if response.clicked() {
                                     self.repeat = !self.repeat;
-                                    self.prefetch_next();
                                 }
                                 if self.repeat {
                                     ui.painter().circle_filled(
@@ -677,7 +705,7 @@ impl MusicApp {
                                     self.seek_position = self.state.position;
                                 }
                                 let response = ui.add_sized(
-                                    [ui.available_width() - 48., 18.],
+                                    [(ui.available_width() - 48.).max(80.), 18.],
                                     egui::Slider::new(
                                         &mut self.seek_position,
                                         0.0..=self.state.duration.max(1.),
@@ -705,6 +733,7 @@ impl MusicApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if icons::button(ui, Icon::Queue, "Open play queue", 32., false).clicked() {
                             self.page = Page::Queue;
+                            self.expanded = false;
                         }
                         if self.volume_wheel.control(
                             ui,
@@ -826,7 +855,6 @@ impl MusicApp {
                                         .clicked()
                                     {
                                         self.queue.push(track.clone());
-                                        self.prefetch_next();
                                     }
                                     let heart = icons::button(
                                         ui,
@@ -919,6 +947,293 @@ impl MusicApp {
         });
     }
 
+    fn check_stream(&mut self, ctx: &egui::Context) {
+        let Some(mut check) = self.stream_check.take() else {
+            return;
+        };
+        let trace = check.started.elapsed().as_secs() / 5;
+        if trace != check.last_trace && check.stage >= 5 {
+            check.last_trace = trace;
+            println!(
+                "Queue check: index {:?}, generation {}, time {:.1}/{:.1}, playing {}, ended {}, video {}x{}",
+                self.current,
+                self.state.generation,
+                self.state.position,
+                self.state.duration,
+                self.state.playing,
+                self.state.ended,
+                self.state.video_width,
+                self.state.video_height
+            );
+        }
+        if check.started.elapsed().as_secs() > 90
+            || (check.stage == 5
+                && self.current == Some(0)
+                && check
+                    .selected
+                    .is_some_and(|selected| selected.elapsed().as_secs() > 15))
+        {
+            eprintln!(
+                "Streaming check timed out: stage {}, ready {}, state {}/{}, playing {}, video {}x{}, error {:?}",
+                check.stage,
+                self.player.is_ready(),
+                self.state.position,
+                self.state.duration,
+                self.state.playing,
+                self.state.video_width,
+                self.state.video_height,
+                self.error
+            );
+            crate::STREAM_CHECK_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.quit = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        match check.stage {
+            0 if self.player.is_ready() => {
+                self.volume = 0.;
+                self.player.send(PlayerCommand::Volume(0.));
+                self.queue = vec![
+                    Track {
+                        id: "Fixture0001".into(),
+                        title: "Streaming check one".into(),
+                        is_video: true,
+                        ..Default::default()
+                    },
+                    Track {
+                        id: "Fixture0002".into(),
+                        title: "Streaming check two".into(),
+                        is_video: true,
+                        ..Default::default()
+                    },
+                ];
+                self.expanded = true;
+                self.video_mode = true;
+                self.player.send(PlayerCommand::Video(true));
+                check.selected = Some(std::time::Instant::now());
+                self.play_at(0);
+                check.stage = 1;
+                println!(
+                    "YouTube engine ready after {:.2}s",
+                    check.started.elapsed().as_secs_f64()
+                );
+            }
+            1 if self.state.playing
+                && self.state.position > 0.3
+                && self.state.video_width > 0
+                && !self.state.ad =>
+            {
+                println!(
+                    "First stream started in {:.2}s; video {}x{}",
+                    check.selected.expect("selection").elapsed().as_secs_f64(),
+                    self.state.video_width,
+                    self.state.video_height
+                );
+                self.player.send(PlayerCommand::Seek(30.));
+                self.player.send(PlayerCommand::Toggle);
+                check.stage = 2;
+            }
+            2 if !self.state.playing && self.state.position >= 29. => {
+                println!("Pause and seek verified");
+                self.player.send(PlayerCommand::Toggle);
+                check.stage = 3;
+            }
+            3 if self.state.playing && self.state.position > 31. && !self.state.ad => {
+                self.video_mode = false;
+                self.player.send(PlayerCommand::Video(false));
+                check.stage = 4;
+            }
+            4 if self.state.playing
+                && self.state.position > 32.
+                && !self.state.ad
+                && !self.state.transition =>
+            {
+                if !self.state.title.to_lowercase().contains("night") {
+                    eprintln!("Audio mode selected another track: {}", self.state.title);
+                    crate::STREAM_CHECK_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    self.quit = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+                println!("Audio mode continues playback");
+                self.video_mode = true;
+                self.player.send(PlayerCommand::Video(true));
+                check.selected = Some(std::time::Instant::now());
+                self.player
+                    .send(PlayerCommand::Seek(self.state.duration - 1.));
+                check.stage = 5;
+            }
+            5 if self.state.playing
+                && self.current == Some(1)
+                && self.state.position > 0.3
+                && self.state.video_width > 0
+                && !self.state.ad =>
+            {
+                println!(
+                    "Next stream started in {:.2}s; video {}x{}",
+                    check.selected.expect("selection").elapsed().as_secs_f64(),
+                    self.state.video_width,
+                    self.state.video_height
+                );
+                println!(
+                    "Streaming, video, audio mode, pause, seek and automatic queue advance checks passed"
+                );
+                self.player.send(PlayerCommand::Stop);
+                self.quit = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+            _ => {}
+        }
+        self.stream_check = Some(check);
+    }
+    fn expanded_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("← Back").clicked() {
+                self.expanded = false;
+            }
+            ui.add_space(16.);
+            ui.heading("Now playing");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.selectable_label(self.video_mode, "Video").clicked() {
+                    self.video_mode = true;
+                    self.player.send(PlayerCommand::Video(true));
+                }
+                if ui.selectable_label(!self.video_mode, "Audio").clicked() {
+                    self.video_mode = false;
+                    self.player.send(PlayerCommand::Video(false));
+                }
+            });
+        });
+        ui.add_space(16.);
+        if let Some(message) = self.error.clone() {
+            ui.colored_label(ACCENT, message);
+            if ui.button("Retry playback").clicked()
+                && let Some(index) = self.current
+            {
+                self.play_at(index);
+            }
+            ui.add_space(12.);
+        }
+        let Some(track) = self.now.clone() else {
+            ui.label("Play a song to open the player.");
+            return;
+        };
+        let right_width = 300.0_f32.min(ui.available_width() * 0.35);
+        let left_width = (ui.available_width() - right_width - 28.0).max(200.0);
+        let height = ui.available_height();
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(left_width, height),
+                Layout::top_down(Align::Center),
+                |ui| {
+                    let media_height = (left_width * 9.0 / 16.0).min((height - 130.0).max(160.0));
+                    if self.video_mode {
+                        let (rect, _) = ui.allocate_exact_size(
+                            Vec2::new(left_width, media_height),
+                            Sense::hover(),
+                        );
+                        ui.painter().rect_filled(rect, 12., Color32::BLACK);
+                        self.video_rect = Some(rect);
+                    } else {
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(left_width, media_height),
+                            Layout::centered_and_justified(egui::Direction::TopDown),
+                            |ui| {
+                                self.cover(ui, &track.cover, media_height.min(left_width));
+                            },
+                        );
+                    }
+                    ui.add_space(20.);
+                    ui.add(egui::Label::new(RichText::new(&track.title).size(22.).strong()).wrap());
+                    ui.label(RichText::new(&track.artist).size(16.).color(MUTED));
+                    if self.state.buffering {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Starting stream…");
+                        });
+                    }
+                    if self.video_mode && self.state.playing && !self.state.video_available {
+                        ui.label(
+                            RichText::new("This track has no music video available.").color(MUTED),
+                        );
+                    }
+                },
+            );
+            ui.separator();
+            ui.allocate_ui_with_layout(
+                Vec2::new(right_width, height),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.heading("Up next");
+                    let start = self.current.map_or(0, |index| index + 1);
+                    let count = self.queue.len().saturating_sub(start);
+                    ui.label(
+                        RichText::new(format!("{count} tracks in queue"))
+                            .small()
+                            .color(MUTED),
+                    );
+                    ui.add_space(12.);
+                    if count == 0 {
+                        ui.label(RichText::new("Add songs to keep listening.").color(MUTED));
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("expanded_queue")
+                        .auto_shrink([false, false])
+                        .show_rows(ui, 76., count, |ui, range| {
+                            for offset in range {
+                                let index = start + offset;
+                                let next = self.queue[index].clone();
+                                let row = egui::Frame::new()
+                                    .fill(PANEL)
+                                    .corner_radius(8)
+                                    .inner_margin(8)
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            self.cover(ui, &next.cover, 46.);
+                                            ui.allocate_ui_with_layout(
+                                                Vec2::new((right_width - 88.).max(90.), 48.),
+                                                Layout::top_down(Align::Min),
+                                                |ui| {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&next.title).strong(),
+                                                        )
+                                                        .truncate(),
+                                                    )
+                                                    .on_hover_text(&next.title);
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&next.artist)
+                                                                .small()
+                                                                .color(MUTED),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                },
+                                            );
+                                        });
+                                    });
+                                let response = row
+                                    .response
+                                    .interact(Sense::click())
+                                    .on_hover_text("Play this track");
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        true,
+                                        format!("Play {}", next.title),
+                                    )
+                                });
+                                if response.clicked() {
+                                    self.play_at(index);
+                                }
+                            }
+                        });
+                },
+            );
+        });
+    }
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(15.);
         ui.heading("Account");
@@ -948,7 +1263,7 @@ impl MusicApp {
         }
         ui.add_space(28.);
         ui.heading("Playback");
-        ui.label("Audio output: Windows default device");
+        ui.label("Playback: official YouTube Music streaming engine");
         let mut step = self
             .preferences
             .volume_scroll_step
@@ -989,6 +1304,8 @@ impl MusicApp {
 impl eframe::App for MusicApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive(ctx);
+        self.check_stream(ctx);
+        self.video_rect = None;
         if ctx.input(|i| i.viewport().close_requested())
             && !self.quit
             && self.preferences.close_to_tray.unwrap_or(true)
@@ -1018,9 +1335,13 @@ impl eframe::App for MusicApp {
                     .inner_margin(egui::Margin::symmetric(30, 24)),
             )
             .show(ctx, |ui| {
+                if self.expanded {
+                    self.expanded_ui(ui);
+                    return;
+                }
                 ui.horizontal(|ui| {
                     let search = ui.add_sized(
-                        [ui.available_width() - 110., 36.],
+                        [(ui.available_width() - 110.).max(120.), 36.],
                         egui::TextEdit::singleline(&mut self.query)
                             .hint_text("Search songs, artists, albums…")
                             .margin(Vec2::new(12., 10.)),
@@ -1132,7 +1453,7 @@ impl eframe::App for MusicApp {
                 );
                 ui.label("Your music. Your desktop.");
                 ui.add_space(12.);
-                ui.label("Native Rust interface · GPU rendering · Windows audio");
+                ui.label("Rust interface · YouTube Music streaming · WebView2 media engine");
                 ui.hyperlink_to(
                     "GitHub project",
                     "https://github.com/zygerr/RustifiedYoutube",
@@ -1141,8 +1462,21 @@ impl eframe::App for MusicApp {
         if self.connecting {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
+        self.player.place_video(
+            if self.about { None } else { self.video_rect },
+            ctx.pixels_per_point(),
+        );
+        if self.stream_check.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if self.now.is_some() && !self.state.playing {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
     }
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if std::env::args().any(|arg| arg == "--smoke-stream") {
+            return;
+        }
         self.preferences.volume = Some(self.volume);
         eframe::set_value(storage, "preferences", &self.preferences);
     }

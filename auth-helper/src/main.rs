@@ -11,7 +11,7 @@ use windows::{
     Win32::System::Com::CoTaskMemFree,
     core::{Interface, PWSTR, w},
 };
-use wry::{PageLoadEvent, WebContext, WebViewBuilder, WebViewExtWindows};
+use wry::{PageLoadEvent, WebContext, WebViewBuilder, WebViewBuilderExtWindows, WebViewExtWindows};
 
 #[derive(Clone)]
 enum LoginEvent {
@@ -39,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut context = WebContext::new(Some(session::profile_dir()?));
     let page_proxy = event_loop.create_proxy();
     let webview = WebViewBuilder::new_with_web_context(&mut context)
+        .with_additional_browser_args("--autoplay-policy=no-user-gesture-required")
         .with_url("https://music.youtube.com/")
         .with_new_window_req_handler(|url, _| {
             if url.starts_with("https://") || url == "about:blank" {
