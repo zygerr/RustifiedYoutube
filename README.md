@@ -19,6 +19,7 @@ An unofficial Windows x64 YouTube Music client. The interface, search, library, 
 - Connect a Google account to access playlists, liked songs, and like/unlike actions.
 - Find account listening history and locally remembered plays in **Discover → Listen again**. Click a card to play; Refresh reloads account history.
 - Seek on the full-width bottom rail or the rail below the expanded media panel. Click or drag to seek; focus the rail and use Left/Right to move five seconds.
+- Hover the app icon in the Windows taskbar for native **Previous**, **Play/Pause**, and **Next** controls. They stay synchronized with playback, work while minimized, and show the current song and artist in the thumbnail tooltip. At the end of the queue, Next is disabled unless Repeat is on.
 - Play, pause, change volume, use previous/next, repeat the queue, and keep playing in the tray. **Shuffle** randomizes upcoming tracks while preserving the current song and played entries; switching it off restores the remaining original order. The choice is saved across launches.
 
 The WebView is active during playback. It shows only the media surface in Video mode; the surrounding interface remains Rust. yt-dlp, Node.js, FFmpeg, complete-track downloads, and the old temporary audio cache are no longer used or bundled. There is no offline library or automatic updater.
@@ -75,6 +76,7 @@ Optional live checks (these contact YouTube):
 ```powershell
 cargo run -p rustified-core --example smoke -- --authenticated
 ./target/debug/RustifiedYoutube.exe --smoke-stream
+./target/debug/RustifiedYoutube.exe --smoke-stream --smoke-taskbar
 ./target/debug/RustifiedYoutube.exe --smoke-rpc
 ./target/debug/RustifiedYoutube.exe --smoke-account
 ./target/debug/RustifiedYoutube.exe --smoke-player-session
@@ -86,6 +88,8 @@ cargo run -p rustified-core --example smoke -- --authenticated
 The streaming check opens a temporary app instance with volume zero, measures two real streams, verifies video dimensions, pause, seek confirmation, and Audio/Video switching, then closes. It does not change saved UI preferences. Unit tests cover full title and history parsing, artist ranking, styled-title glyph coverage, volume wheel interaction, seek interaction and width, shuffle order, and media bridge restrictions.
 
 If YouTube ignores a track selection, the player retries once using that exact watch URL. After detecting a broken SPA router, subsequent selections use direct watch navigation for the current app session. Recovery preserves the native queue and account selection; the error banner also offers **Retry playback** and **Google sign-in**. A navigation failure alone is not treated as a Google logout.
+
+The taskbar check waits for the real Windows thumbnail toolbar, minimizes its muted test window, and sends native thumbnail-click notifications to that window. It verifies pause/resume, Previous/Next, icon-state updates, and disabled Next at the end of the queue. It uses the normal playback and queue handlers.
 
 The RPC check verifies the real Discord handshake and acknowledgement of a clear-activity command without displaying a test song. Unit tests also cover presence timestamps, pause/ad clearing, Unicode limits, fragmented IPC frames, pings, and immediate volume protection.
 

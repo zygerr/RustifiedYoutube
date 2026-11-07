@@ -46,6 +46,7 @@ struct StreamCheck {
     last_trace: u64,
     session_refreshed: bool,
     saw_ad: bool,
+    taskbar_checked: bool,
 }
 struct AccountCheck {
     started: std::time::Instant,
@@ -64,6 +65,7 @@ pub struct MusicApp {
     backend: Backend,
     player: Player,
     discord: crate::discord::Discord,
+    taskbar: Option<crate::taskbar::Taskbar>,
     state: PlayerState,
     page: Page,
     query: String,
@@ -117,7 +119,10 @@ pub struct MusicApp {
 }
 
 impl MusicApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        taskbar_events: Option<crate::taskbar::Events>,
+    ) -> Self {
         let ctx = &cc.egui_ctx;
         crate::fonts::install(ctx);
         let mut style = (*ctx.style()).clone();
@@ -142,10 +147,12 @@ impl MusicApp {
         let (tray_tx, tray_rx) = mpsc::channel();
         let tray = Self::create_tray(ctx.clone(), tray_tx).ok();
         let player = Player::start(cc, volume as f64);
+        let taskbar = crate::taskbar::Taskbar::start(cc, taskbar_events);
         player.send(PlayerCommand::Volume(volume as f64));
         let mut app = Self {
             backend: Backend::start(ctx.clone()),
             player,
+            taskbar,
             discord: crate::discord::Discord::start(ctx.clone()),
             state: PlayerState::default(),
             page: Page::Discover,
@@ -203,6 +210,7 @@ impl MusicApp {
                     last_trace: 0,
                     session_refreshed: false,
                     saw_ad: false,
+                    taskbar_checked: false,
                 }),
             snapshot: crate::preview::Snapshot::new(),
             account_check: crate::account::smoke_active().then(|| AccountCheck {
@@ -623,6 +631,21 @@ impl MusicApp {
         if self.player.needs_login() || self.player.login_open() {
             self.state.playing = false;
             self.state.buffering = false;
+        }
+        let taskbar_actions = self
+            .taskbar
+            .as_mut()
+            .map(|taskbar| taskbar.poll())
+            .unwrap_or_default();
+        for action in taskbar_actions {
+            match action {
+                crate::taskbar::Action::Toggle => self.player.send(PlayerCommand::Toggle),
+                crate::taskbar::Action::Previous => self.previous(),
+                crate::taskbar::Action::Next => self.next(),
+            }
+            if crate::taskbar::smoke_active() {
+                println!("Taskbar action dispatched: {action:?}");
+            }
         }
         while let Ok(action) = self.tray_rx.try_recv() {
             match action {
@@ -1446,10 +1469,25 @@ impl MusicApp {
                 }
             });
     }
+    fn smoke_toggle(&self) {
+        if crate::taskbar::smoke_active() {
+            if let Some(bar) = &self.taskbar {
+                bar.smoke_click(crate::taskbar::Action::Toggle);
+            }
+        } else {
+            self.player.send(PlayerCommand::Toggle);
+        }
+    }
     fn check_stream(&mut self, ctx: &egui::Context) {
         let Some(mut check) = self.stream_check.take() else {
             return;
         };
+        if crate::taskbar::smoke_active() && check.stage == 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            if let Some(bar) = &self.taskbar {
+                bar.smoke_show();
+            }
+        }
         let trace = check.started.elapsed().as_secs() / 5;
         if trace != check.last_trace && check.stage >= 1 {
             check.last_trace = trace;
@@ -1490,7 +1528,13 @@ impl MusicApp {
             return;
         }
         match check.stage {
-            0 if self.player.is_ready() => {
+            0 if self.player.is_ready()
+                && (!crate::taskbar::smoke_active()
+                    || self.taskbar.as_ref().is_some_and(|bar| bar.installed())) =>
+            {
+                if crate::taskbar::smoke_active() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
                 self.volume = 0.;
                 self.player.send(PlayerCommand::Volume(0.));
                 self.queue = vec![
@@ -1532,7 +1576,7 @@ impl MusicApp {
                 );
                 self.seek_to(30.);
                 assert_eq!(self.timeline.position(self.state.position), 30.);
-                self.player.send(PlayerCommand::Toggle);
+                self.smoke_toggle();
                 check.stage = 2;
             }
             2 if !self.state.playing
@@ -1560,11 +1604,16 @@ impl MusicApp {
                 println!(
                     "Playback document reauthenticated; paused track, position and mute restored"
                 );
-                self.player.send(PlayerCommand::Toggle);
+                self.smoke_toggle();
                 check.stage = 3;
             }
             3 if self.state.playing && self.state.position > 31. && !self.state.ad => {
-                if self.connected && !check.session_refreshed {
+                if crate::taskbar::smoke_active() && !check.taskbar_checked {
+                    if let Some(bar) = &self.taskbar {
+                        bar.smoke_click(crate::taskbar::Action::Next);
+                    }
+                    check.stage = 8;
+                } else if self.connected && !check.session_refreshed {
                     self.connecting = true;
                     self.backend.send(Request::Connect {
                         force_login: self.player.authenticated() != Some(true),
@@ -1577,11 +1626,30 @@ impl MusicApp {
                     check.stage = 4;
                 }
             }
+            8 if self.current == Some(1) && self.state.playing && self.state.position > 0.3 => {
+                if let Some(bar) = &self.taskbar {
+                    bar.smoke_click(crate::taskbar::Action::Previous);
+                }
+                check.stage = 9;
+            }
+            9 if self.current == Some(0)
+                && self.state.playing
+                && self.state.position > 0.3
+                && self.state.duration > 31.
+                && !self.state.buffering =>
+            {
+                check.taskbar_checked = true;
+                self.seek_to(30.);
+                check.stage = 3;
+                println!(
+                    "Taskbar Previous and Next verified through the native window message handler"
+                );
+            }
             6 if !self.connecting
                 && self.account_status.starts_with("Google account connected") =>
             {
                 if self.current != Some(0)
-                    || self.state.generation != 1
+                    || self.state.generation != self.play_request
                     || self.state.position < 31.
                 {
                     eprintln!("Session refresh reset playback");
@@ -1594,6 +1662,8 @@ impl MusicApp {
                 check.stage = 3;
             }
             4 if self.state.playing
+                && self.state.duration > 1.
+                && !self.state.buffering
                 && self.state.position > 32.
                 && !self.state.ad
                 && !self.state.transition =>
@@ -1612,7 +1682,15 @@ impl MusicApp {
                 self.seek_to(self.state.duration - 1.);
                 check.stage = 5;
             }
-            5 if self.state.playing
+            5 if (!crate::taskbar::smoke_active()
+                || self.taskbar.as_ref().is_some_and(|bar| {
+                    bar.synchronized(crate::taskbar::Controls {
+                        has_track: true,
+                        playing: true,
+                        can_next: false,
+                    })
+                }))
+                && self.state.playing
                 && self.current == Some(1)
                 && self.state.position > 0.3
                 && self.state.video_width > 0
@@ -1632,6 +1710,11 @@ impl MusicApp {
                 println!(
                     "Streaming, video, audio mode, pause, seek, login rebinding and automatic queue advance checks passed"
                 );
+                if crate::taskbar::smoke_active() {
+                    println!(
+                        "Taskbar toolbar: registration, minimized pause/resume, Previous/Next, playing icon and disabled final Next verified"
+                    );
+                }
                 self.player.send(PlayerCommand::Stop);
                 self.quit = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2095,6 +2178,23 @@ impl eframe::App for MusicApp {
             self.now.as_ref(),
             &self.state,
         );
+        if let Some(taskbar) = &mut self.taskbar {
+            let controls = crate::taskbar::Controls {
+                has_track: self.now.is_some()
+                    && !self.player.login_open()
+                    && !self.player.needs_login(),
+                playing: self.state.playing,
+                can_next: self.current.is_some_and(|index| {
+                    index + 1 < self.queue.len() || (self.repeat && !self.queue.is_empty())
+                }),
+            };
+            let tooltip = self
+                .now
+                .as_ref()
+                .map(|track| format!("{} — {}", track.title, track.artist))
+                .unwrap_or_else(|| "RustifiedYoutube".into());
+            taskbar.update(controls, &tooltip);
+        }
         self.video_rect = None;
         if ctx.input(|i| i.viewport().close_requested())
             && !self.quit

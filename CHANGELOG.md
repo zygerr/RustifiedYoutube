@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.9
+
+- Add native Windows taskbar thumbnail controls for Previous, Play/Pause, and Next, routed through the existing player and queue.
+- Synchronize the center icon and tooltips with playback, disable unavailable actions, and show the current song and artist in the thumbnail tooltip.
+- Capture taskbar creation before the main window is created and restore the toolbar after Explorer recreates the taskbar button.
+- Generate transparent native icons that remain legible on light and dark taskbar previews; release icons, hooks, and COM resources on exit.
+- Add a live muted taskbar check covering native command dispatch, pause/resume while minimized, previous/next queue navigation, and disabled Next at the end of the queue.
+
 ## 0.3.8
 
 - Recover ignored or stalled YouTube Music navigation automatically using the exact requested watch URL, with one bounded recovery attempt per track.

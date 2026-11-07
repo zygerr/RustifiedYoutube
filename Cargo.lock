@@ -3927,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "rustified-auth"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "rustified-core",
  "serde_json",
@@ -3939,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "rustified-core"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3956,7 +3956,7 @@ dependencies = [
 
 [[package]]
 name = "rustified-youtube-native"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "eframe",
@@ -3964,6 +3964,7 @@ dependencies = [
  "muda",
  "open",
  "rand",
+ "raw-window-handle",
  "reqwest",
  "rustified-core",
  "serde",

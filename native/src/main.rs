@@ -12,6 +12,7 @@ mod playback_session;
 mod player;
 mod preview;
 mod queue;
+mod taskbar;
 mod theme;
 mod timeline;
 mod volume;
@@ -65,6 +66,15 @@ fn main() -> eframe::Result {
         height: image.height(),
         rgba: image.into_raw(),
     };
+    let taskbar_events = match taskbar::Events::start() {
+        Ok(events) => Some(events),
+        Err(error) => {
+            if taskbar::smoke_active() {
+                eprintln!("Taskbar hook initialization failed: {error}");
+            }
+            None
+        }
+    };
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size(if preview::compact() {
@@ -82,7 +92,7 @@ fn main() -> eframe::Result {
     let result = eframe::run_native(
         "RustifiedYoutube",
         options,
-        Box::new(|cc| Ok(Box::new(app::MusicApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::MusicApp::new(cc, taskbar_events)))),
     );
     drop(instance);
     if smoke && STREAM_CHECK_FAILED.load(std::sync::atomic::Ordering::SeqCst) {
