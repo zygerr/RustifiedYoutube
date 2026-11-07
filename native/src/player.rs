@@ -111,7 +111,7 @@ pub struct Player {
     seek_revision: Cell<u64>,
 }
 impl Player {
-    pub fn start(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn start(cc: &eframe::CreationContext<'_>, volume: f64) -> Self {
         let (events, incoming) = mpsc::channel();
         let (updates, rx) = mpsc::channel();
         let mut result = Self {
@@ -124,7 +124,7 @@ impl Player {
             pending: RefCell::new(Vec::new()),
             generation: Cell::new(0),
             requested: Cell::new(None),
-            volume: Cell::new(0.5),
+            volume: Cell::new(volume.clamp(0.0, 1.0)),
             video: Cell::new(false),
             last_bounds: Cell::new(None),
             quit_requested: Cell::new(false),
@@ -144,7 +144,11 @@ impl Player {
                     position: wry::dpi::PhysicalPosition::new(-200, -200).into(),
                     size: wry::dpi::PhysicalSize::new(160, 90).into(),
                 })
-                .with_initialization_script(include_str!("media_bridge.js"))
+                .with_initialization_script(format!(
+                    "window.__rustifiedInitialVolume={};\n{}",
+                    result.volume.get(),
+                    include_str!("media_bridge.js")
+                ))
                 .with_ipc_handler(move |request| {
                     if !playback_origin(&request.uri().to_string()) || request.body().len() > 16384
                     {

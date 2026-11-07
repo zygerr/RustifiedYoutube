@@ -2,11 +2,44 @@
   if (location.origin !== 'https://music.youtube.com' || window.__rustifiedMedia) return;
   const session = { generation: 0, target: '', playing: false, volume: .5, video: false, ready: false, counterpartUntil: 0, changed: 0, error: null, modeApplied: false, appliedMode: null, transition: null, diagnostic: false, lastPosition: 0, lastDuration: 0, seekRequest: null, seekAck: 0 };
   let last = '', boundVideo = null, ended = false, playAttempt = 0, lastAd = false;
+  if (Number.isFinite(window.__rustifiedInitialVolume)) session.volume=Math.max(0,Math.min(1,window.__rustifiedInitialVolume));
   const send = data => window.ipc.postMessage(JSON.stringify(data));
   const api = () => document.querySelector('ytmusic-player')?.playerApi || document.querySelector('ytmusic-player-bar')?.playerApi || document.getElementById('movie_player');
   const video = () => api()?.getVideoElement?.() || api()?.querySelector?.('video') || document.querySelector('#movie_player video') || document.querySelector('ytmusic-player video') || document.querySelector('video');
   const position = () => Number(api()?.getCurrentTime?.() ?? video()?.currentTime ?? 0);
   const duration = () => Number(api()?.getDuration?.() ?? video()?.duration ?? 0);
+  const capVolume = media => {
+    if (!media) return;
+    if (media.volume > session.volume) media.volume=session.volume;
+    if (session.volume === 0 && !media.muted) media.muted=true;
+  };
+  // YouTube replaces media elements and restores its saved volume on source
+  // changes. Enforce the native ceiling synchronously, before a sample plays,
+  // while preserving lower levels applied by YouTube's loudness normalization.
+  const mediaPrototype=globalThis.HTMLMediaElement?.prototype;
+  const volumeDescriptor=mediaPrototype && Object.getOwnPropertyDescriptor(mediaPrototype,'volume');
+  if (volumeDescriptor?.configurable && volumeDescriptor.set) {
+    Object.defineProperty(mediaPrototype,'volume',{
+      ...volumeDescriptor,
+      set(value) {
+        const number=Number(value);
+        volumeDescriptor.set.call(this,Number.isFinite(number) ? Math.min(number,session.volume) : value);
+      }
+    });
+  }
+  if (mediaPrototype?.play) {
+    const play=mediaPrototype.play;
+    mediaPrototype.play=function(...args) { capVolume(this); return play.apply(this,args); };
+  }
+  const applyVolume = () => {
+    capVolume(video());
+  };
+  for (const event of ['volumechange','loadstart','loadedmetadata','canplay','play','playing']) {
+    document.addEventListener(event,event => { capVolume(event.target); applyVolume(); },true);
+  }
+  if (typeof MutationObserver !== 'undefined') new MutationObserver(() => {
+    document.querySelectorAll('audio,video').forEach(capVolume);
+  }).observe(document,{subtree:true,childList:true});
   const trace = (phase,target=null) => { if (session.diagnostic) send({type:'trace',phase,position:video()?.currentTime || 0,target,video:session.video,ready:video()?.readyState || 0,seeking:!!video()?.seeking,api_state:api()?.getPlayerState?.() ?? -1}); };
   const seek = (seconds,revision=0) => {
     session.seekRequest={target:seconds,revision,requested:performance.now()};
@@ -31,7 +64,9 @@
       session.transition = { source: video()?.currentSrc, started: performance.now(), loaded: false, seek: null, seekRevision: 0 };
       session.counterpartUntil = performance.now() + 10000;
       session.changed = performance.now();
+      applyVolume();
       button.click();
+      applyVolume();
       trace('mode_started');
     }
   };
@@ -76,6 +111,7 @@
           session.seekRequest=null;
           session.seekAck=0;
           ended = false;
+          applyVolume();
           document.dispatchEvent(new CustomEvent('yt-navigate', { detail: { endpoint: { watchEndpoint: { videoId: command.id, playlistId: 'RDAMVM' + command.id } } } }));
           break;
         case 'toggle':
@@ -84,7 +120,7 @@
             window.__rustifiedMedia.command({op:'play',id:session.target,generation:session.generation});
             return;
           }
-          if (session.playing) { player?.playVideo?.(); media?.play().catch(() => {}); }
+          if (session.playing) { applyVolume(); player?.playVideo?.(); media?.play().catch(() => {}); }
           else { player?.pauseVideo?.(); media?.pause(); }
           break;
         case 'pause': session.playing = false; player?.pauseVideo?.(); media?.pause(); break;
@@ -93,6 +129,7 @@
           player?.setVolume?.(session.volume * 100);
           if (media) { media.volume = session.volume; media.muted = session.volume === 0; }
           if (session.volume > 0) player?.unMute?.();
+          applyVolume();
           break;
         case 'seek':
           if (Number.isFinite(command.value)) {
@@ -118,6 +155,7 @@
     style();
     const media = video();
     const player = api();
+    applyVolume();
     if (!session.ready && document.querySelector('ytmusic-player-bar') && document.readyState === 'complete') {
       session.ready = true;
       send({ type: 'ready' });
@@ -158,11 +196,11 @@
       if (!ad && !session.modeApplied && media.readyState >= 1) { session.modeApplied = true; setMode(); }
       if (session.playing && media.paused && !ended && performance.now() - playAttempt > 1000) {
         playAttempt = performance.now();
+        applyVolume();
         player?.playVideo?.();
         media.play().catch(() => {});
       }
       if (!session.playing && !media.paused) media.pause();
-      if (Math.abs(media.volume - session.volume) > .001) media.volume = session.volume;
       if (media.error) session.error = 'The YouTube player could not play this track.';
       const transition = session.transition;
       if (!ad && transition && media.readyState >= 3) {

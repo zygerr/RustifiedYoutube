@@ -35,6 +35,8 @@ struct Preferences {
     close_to_tray: Option<bool>,
     volume_scroll_step: Option<u8>,
     shuffle: Option<bool>,
+    discord_rpc: Option<bool>,
+    discord_application_id: Option<String>,
 }
 
 struct StreamCheck {
@@ -55,6 +57,7 @@ enum TrayAction {
 pub struct MusicApp {
     backend: Backend,
     player: Player,
+    discord: crate::discord::Discord,
     state: PlayerState,
     page: Page,
     query: String,
@@ -128,11 +131,12 @@ impl MusicApp {
         let shuffle = preferences.shuffle.unwrap_or(false);
         let (tray_tx, tray_rx) = mpsc::channel();
         let tray = Self::create_tray(ctx.clone(), tray_tx).ok();
-        let player = Player::start(cc);
+        let player = Player::start(cc, volume as f64);
         player.send(PlayerCommand::Volume(volume as f64));
         Self {
             backend: Backend::start(ctx.clone()),
             player,
+            discord: crate::discord::Discord::start(ctx.clone()),
             state: PlayerState::default(),
             page: Page::Discover,
             query: String::new(),
@@ -680,7 +684,7 @@ impl MusicApp {
 
     fn player_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("player")
-            .exact_height(if self.expanded { 100. } else { 136. })
+            .exact_height(136.)
             .frame(
                 egui::Frame::new()
                     .fill(PANEL)
@@ -817,9 +821,7 @@ impl MusicApp {
                         );
                     });
                 });
-                if !self.expanded {
-                    self.timeline_ui(ui, "compact_timeline");
-                }
+                self.timeline_ui(ui, "compact_timeline");
             });
     }
 
@@ -1159,10 +1161,11 @@ impl MusicApp {
             return;
         };
         let trace = check.started.elapsed().as_secs() / 5;
-        if trace != check.last_trace && check.stage >= 5 {
+        if trace != check.last_trace && check.stage >= 1 {
             check.last_trace = trace;
             println!(
-                "Queue check: index {:?}, generation {}, time {:.1}/{:.1}, playing {}, ended {}, video {}x{}",
+                "Queue check: stage {}, index {:?}, generation {}, time {:.1}/{:.1}, playing {}, ended {}, video {}x{}",
+                check.stage,
                 self.current,
                 self.state.generation,
                 self.state.position,
@@ -1501,6 +1504,40 @@ impl MusicApp {
             self.preferences.close_to_tray = Some(close_to_tray);
         }
         ui.add_space(28.);
+        ui.heading("Discord Rich Presence");
+        let mut enabled = self.preferences.discord_rpc.unwrap_or(true);
+        if ui
+            .checkbox(&mut enabled, "Show what I'm listening to on Discord")
+            .changed()
+        {
+            self.preferences.discord_rpc = Some(enabled);
+        }
+        ui.label(RichText::new("Shares the song, artist, artwork and progress while playing. Hides on pause or during ads.").small().color(MUTED));
+        ui.label(RichText::new(&self.discord.status).color(if enabled { ACCENT } else { MUTED }));
+        ui.collapsing("Application settings", |ui| {
+            let mut id = self
+                .preferences
+                .discord_application_id
+                .clone()
+                .unwrap_or_else(|| crate::discord::APPLICATION_ID.into());
+            ui.horizontal(|ui| {
+                ui.label("Discord Application ID");
+                if ui
+                    .add(egui::TextEdit::singleline(&mut id).desired_width(220.))
+                    .changed()
+                {
+                    self.preferences.discord_application_id = Some(id.trim().into());
+                }
+            });
+            if !crate::discord::valid_application_id(&id) {
+                ui.colored_label(ACCENT, "Use the public numeric Application ID.");
+            }
+            ui.hyperlink_to(
+                "Discord Developer Portal",
+                "https://discord.com/developers/applications",
+            );
+        });
+        ui.add_space(28.);
         ui.heading("RustifiedYoutube");
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
         if ui.button("About RustifiedYoutube").clicked() {
@@ -1517,6 +1554,16 @@ impl eframe::App for MusicApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive(ctx);
         self.check_stream(ctx);
+        self.discord.update(
+            self.preferences.discord_rpc.unwrap_or(true)
+                && !std::env::args().any(|arg| arg == "--smoke-stream"),
+            self.preferences
+                .discord_application_id
+                .as_deref()
+                .unwrap_or(crate::discord::APPLICATION_ID),
+            self.now.as_ref(),
+            &self.state,
+        );
         self.video_rect = None;
         if ctx.input(|i| i.viewport().close_requested())
             && !self.quit
@@ -1645,7 +1692,9 @@ impl eframe::App for MusicApp {
                     }
                     Page::Library => self.library_ui(ui),
                     Page::Queue => self.tracks_ui(ui, true),
-                    Page::Settings => self.settings_ui(ui),
+                    Page::Settings => {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.settings_ui(ui));
+                    }
                     Page::Tracks(_) => {
                         if self.loading {
                             ui.spinner();

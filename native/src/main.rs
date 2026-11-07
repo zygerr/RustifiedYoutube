@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
 mod backend;
+mod discord;
 mod fonts;
 mod icons;
 mod player;
@@ -12,6 +13,16 @@ pub static STREAM_CHECK_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 fn main() -> eframe::Result {
+    if std::env::args().any(|arg| arg == "--smoke-rpc") {
+        match discord::smoke() {
+            Ok(()) => println!("Discord handshake and activity acknowledgement verified"),
+            Err(error) => {
+                eprintln!("Discord RPC check failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     let smoke = std::env::args().any(|arg| arg == "--smoke-stream");
     let instance = single_instance::SingleInstance::new("RustifiedYoutube-native")
         .expect("single instance mutex");

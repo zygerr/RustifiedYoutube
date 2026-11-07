@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2
+
+- Add native Discord Rich Presence with the current song, artist, artwork, playback timestamps, and a YouTube Music link; reconnect automatically when Discord starts again.
+- Add a saved Discord toggle and connection status in Settings. Clear presence on pause, advertisements, disabled sharing, or exit. No Discord account token is required.
+- Keep the footer height, song information, controls, and seek rail in place when opening or closing the expanded player.
+- Apply the saved volume before the media engine starts, cap source volume synchronously, and reapply the limit on media lifecycle changes.
+- Preserve YouTube's lower loudness-normalized levels instead of periodically raising them to the raw slider level.
+- Add media-volume regression checks and Discord payload, framing, handshake, and Unicode coverage.
+
 ## 0.3.1
 
 - Stretch the seek rail across the compact player and scale the expanded rail to the media panel.

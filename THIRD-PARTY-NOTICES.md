@@ -8,4 +8,6 @@ Windows font files are loaded from the local Windows Fonts directory for Unicode
 
 Version 0.3 no longer bundles yt-dlp, Node.js, or FFmpeg. The streaming architecture was researched using https://github.com/ytmdesktop/ytmdesktop. RustifiedYoutube uses its own media bridge rather than bundling that application.
 
-This project is independent and is not affiliated with Google, YouTube, Microsoft, or the authors of its dependencies.
+Discord Rich Presence uses a Rust implementation of Discord's documented local IPC protocol. No Discord SDK, user token, or client secret is bundled.
+
+This project is independent and is not affiliated with Google, YouTube, Microsoft, Discord, or the authors of its dependencies.

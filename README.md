@@ -6,6 +6,7 @@ An unofficial Windows x64 YouTube Music client. The interface, search, library, 
 
 - Start streaming without downloading and remuxing an entire track first. The YouTube engine warms up when the app opens and stays alive between tracks. Actual startup time still depends on YouTube, the connection, and any normal playback restrictions.
 - Click the current song or artwork in the bottom-left player bar to open the expanded player.
+- The bottom song information, controls, and seek rail stay in the same position when opening or closing the expanded player.
 - Switch between Audio (artwork) and Video in the expanded view. When YouTube Music offers separate song/video versions, the player uses its own toggle; a track without a music video cannot gain one.
 - View and play upcoming queue entries in the right-hand panel. Back returns to search or the library without stopping playback.
 - Render styled Unicode song titles, symbols, and emoji with fallback fonts installed by Windows. Windows font files are read locally and are not redistributed.
@@ -34,6 +35,14 @@ Use the native player bar or tray menu. `Ctrl+Alt+Space` toggles playback and `C
 
 Scroll up/down over the volume slider or percentage. **Settings → Playback → Volume step per scroll notch** accepts an integer from **1% to 100%**, with a default of 5%. Volume remains within 0–100%, and the step is saved across launches.
 
+The saved volume is applied before playback starts and limits new audio/video sources immediately. Lower levels used by YouTube's loudness normalization are preserved.
+
+## Discord Rich Presence
+
+Keep Discord desktop running and play a song. Rich Presence shows the song, artist, cover, progress, and a **Listen on YouTube Music** button. **Settings → Discord Rich Presence** enables or disables sharing and shows the connection status. Presence is cleared on pause, buffering, advertisements, or exit, and the client reconnects when Discord restarts.
+
+The default public Application ID is `1568660934296076398`. You can override it under **Application settings** using an application registered in the [Discord Developer Portal](https://discord.com/developers/applications). This uses Discord's [local RPC protocol](https://docs.discord.com/developers/topics/rpc); no account login, bot token, or client secret is needed. YouTube/Google session data never enters the RPC payload. Discord's own activity-sharing settings must also allow the activity to be visible.
+
 ## Build and checks
 
 ```powershell
@@ -53,9 +62,12 @@ Optional live checks (these contact YouTube):
 ```powershell
 cargo run -p rustified-core --example smoke -- --authenticated
 ./target/debug/RustifiedYoutube.exe --smoke-stream
+./target/debug/RustifiedYoutube.exe --smoke-rpc
 ```
 
 The streaming check opens a temporary app instance with volume zero, measures two real streams, verifies video dimensions, pause, seek confirmation, and Audio/Video switching, then closes. It does not change saved UI preferences. Unit tests cover full title and history parsing, artist ranking, styled-title glyph coverage, volume wheel interaction, seek interaction and width, shuffle order, and media bridge restrictions.
+
+The RPC check verifies the real Discord handshake and acknowledgement of a clear-activity command without displaying a test song. Unit tests also cover presence timestamps, pause/ad clearing, Unicode limits, fragmented IPC frames, pings, and immediate volume protection.
 
 ## Releases
 
