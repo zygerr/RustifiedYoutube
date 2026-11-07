@@ -17,7 +17,7 @@ pub enum Request {
     Captured(crate::account::Capture),
     Disconnect,
     Like(String, bool),
-    Cover(String),
+    Cover(String, bool),
 }
 
 pub enum Response {
@@ -108,19 +108,9 @@ impl Backend {
                             Request::Disconnect => {
                                 if account.disconnect().await.is_err(){send(&updates,&ctx,Response::Notice("Couldn't disconnect the native library session. Try again.".into()));}
                             }
-                            Request::Cover(url) => {
-                                let Ok(parsed) = reqwest::Url::parse(&url) else { return; };
-                                if parsed.scheme() != "https" || !parsed.host_str().is_some_and(|h| h.ends_with(".ytimg.com") || h.ends_with(".ggpht.com") || h.ends_with(".googleusercontent.com")) { return; }
+                            Request::Cover(url,large) => {
                                 let Ok(_permit) = images.acquire().await else { return; };
-                                let Ok(response) = http.get(&url).send().await else { return; };
-                                if !response.status().is_success() || response.content_length().is_some_and(|s| s > 2_000_000) { return; }
-                                let Ok(bytes) = response.bytes().await else { return; };
-                                if bytes.len() > 2_000_000 { return; }
-                                let decoded = tokio::task::spawn_blocking(move || {
-                                    let image = image::load_from_memory(&bytes).ok()?.thumbnail(320, 320).to_rgba8();
-                                    Some(egui::ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], &image))
-                                }).await;
-                                if let Ok(Some(image)) = decoded { send(&updates, &ctx, Response::Cover(url, image)); }
+                                if let Some(image)=crate::artwork::fetch(&http,&url,large).await {send(&updates,&ctx,Response::Cover(crate::artwork::key(&url,large),image));}
                             }
                         }
                     });

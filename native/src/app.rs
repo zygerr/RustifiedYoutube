@@ -91,6 +91,8 @@ pub struct MusicApp {
     play_request: u64,
     volume: f32,
     volume_wheel: crate::volume::Wheel,
+    artwork_wheel: crate::volume::Wheel,
+    thumbnail_wheel: crate::volume::Wheel,
     repeat: bool,
     shuffle: bool,
     preferences: Preferences,
@@ -178,6 +180,8 @@ impl MusicApp {
             play_request: 0,
             volume,
             volume_wheel: crate::volume::Wheel::default(),
+            artwork_wheel: Default::default(),
+            thumbnail_wheel: Default::default(),
             repeat: false,
             shuffle,
             preferences,
@@ -512,10 +516,19 @@ impl MusicApp {
                     }
                 }
                 Response::Cover(url, image) => {
-                    if self.textures.len() >= 128
-                        && let Some(old) = self.texture_order.pop_front()
-                    {
-                        self.textures.remove(&old);
+                    let bytes = image.width() * image.height() * 4;
+                    let mut used = self
+                        .textures
+                        .values()
+                        .map(|texture| texture.size()[0] * texture.size()[1] * 4)
+                        .sum::<usize>();
+                    while self.textures.len() >= 128 || used + bytes > crate::artwork::CACHE_BYTES {
+                        let Some(old) = self.texture_order.pop_front() else {
+                            break;
+                        };
+                        if let Some(texture) = self.textures.remove(&old) {
+                            used = used.saturating_sub(texture.size()[0] * texture.size()[1] * 4);
+                        }
                         self.requested.remove(&old);
                     }
                     self.textures.insert(
@@ -589,14 +602,60 @@ impl MusicApp {
             return Some(texture.clone());
         }
         if !url.is_empty() && self.requested.insert(url.into()) {
-            self.backend.send(Request::Cover(url.into()));
+            self.backend.send(Request::Cover(url.into(), false));
         }
         None
     }
-    fn cover(&mut self, ui: &mut egui::Ui, url: &str, size: f32) {
-        let texture = self.artwork(url);
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    fn cover(&mut self, ui: &mut egui::Ui, url: &str, size: f32) -> egui::Response {
+        let texture = if size > catalog::CARD_ART {
+            let key = crate::artwork::key(url, true);
+            if let Some(texture) = self.textures.get(&key) {
+                Some(texture.clone())
+            } else {
+                if !url.is_empty() && self.requested.insert(key) {
+                    self.backend.send(Request::Cover(url.into(), true));
+                }
+                self.artwork(url)
+            }
+        } else {
+            self.artwork(url)
+        };
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
         catalog::cover(ui, rect, texture.as_ref());
+        response
+    }
+    fn artwork_volume(&mut self, ui: &mut egui::Ui, response: egui::Response, large: bool) {
+        let rect = response.rect;
+        let step = self.preferences.volume_scroll_step.unwrap_or(5);
+        let wheel = if large {
+            &mut self.artwork_wheel
+        } else {
+            &mut self.thumbnail_wheel
+        };
+        if wheel.over(ui, rect, &mut self.volume, step) {
+            self.player.send(PlayerCommand::Volume(self.volume as f64));
+            ui.ctx().request_repaint();
+        }
+        if large && response.hovered() {
+            let badge = egui::Rect::from_min_size(
+                rect.right_bottom() - Vec2::new(80., 42.),
+                Vec2::new(68., 30.),
+            );
+            ui.painter()
+                .rect_filled(badge, 6., Color32::from_black_alpha(185));
+            ui.painter().text(
+                badge.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{:.0}%", self.volume * 100.),
+                FontId::proportional(14.),
+                TEXT,
+            );
+        }
+        response.on_hover_text(format!(
+            "Volume: {:.0}% · Scroll ±{}%",
+            self.volume * 100.,
+            step
+        ));
     }
 
     fn nav(ui: &mut egui::Ui, text: &str, icon: Icon, selected: bool) -> bool {
@@ -774,7 +833,8 @@ impl MusicApp {
                         Layout::left_to_right(Align::Center),
                         |ui| {
                             if let Some(track) = self.now.clone() {
-                                self.cover(ui, &track.cover, catalog::ROW_ART);
+                                let cover = self.cover(ui, &track.cover, catalog::ROW_ART);
+                                self.artwork_volume(ui, cover, false);
                                 ui.vertical(|ui| {
                                     ui.add(
                                         egui::Label::new(RichText::new(&track.title).strong())
@@ -1568,7 +1628,9 @@ impl MusicApp {
                             Vec2::new(left_width, media_height),
                             Layout::centered_and_justified(egui::Direction::TopDown),
                             |ui| {
-                                self.cover(ui, &track.cover, media_height.min(left_width));
+                                let cover =
+                                    self.cover(ui, &track.cover, media_height.min(left_width));
+                                self.artwork_volume(ui, cover, true);
                             },
                         );
                     }

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod account;
 mod app;
+mod artwork;
 mod backend;
 mod catalog_ui;
 mod discord;
@@ -16,6 +17,13 @@ pub static STREAM_CHECK_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 fn main() -> eframe::Result {
+    if std::env::args().any(|arg| arg == "--smoke-artwork") {
+        if let Err(error) = artwork::smoke() {
+            eprintln!("Artwork check failed: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--smoke-rpc") {
         match discord::smoke() {
             Ok(()) => println!("Discord handshake and activity acknowledgement verified"),

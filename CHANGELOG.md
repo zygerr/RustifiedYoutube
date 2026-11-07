@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.5
+
+- Select the largest artwork source returned by YouTube Music instead of the thumbnail nearest 256 px.
+- Request sharper 512 px catalog artwork and separate artwork up to 1536 px for the expanded player; retain the existing thumbnail until the larger image arrives.
+- Try YouTube HD video thumbnails with standard/original fallbacks, preserve Google artwork crop options, and avoid upscaling a small source.
+- Bound decoded artwork texture caching to 64 MiB and limit image download/decode sizes.
+- Adjust volume by scrolling over the expanded song artwork or the current-song thumbnail, using the saved 1–100% scroll step. Show the current percentage when hovering the large cover.
+- Keep independent wheel accumulation for artwork and the volume slider, consume scroll only over the target image, and add live artwork-resolution and input regression checks.
+
 ## 0.3.4
 
 - Restore the native account directly from the application's persistent WebView2 profile at startup and refresh its cookies every five minutes.

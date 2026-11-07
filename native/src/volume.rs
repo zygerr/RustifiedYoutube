@@ -17,6 +17,39 @@ impl Wheel {
         }
     }
 
+    pub fn over(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        volume: &mut f32,
+        step: u8,
+    ) -> bool {
+        let before = *volume;
+        if ui.rect_contains_pointer(rect) {
+            let units = ui.input_mut(|input| {
+                let mut units = 0.;
+                input.events.retain(|event| {
+                    if let Event::MouseWheel { unit, delta, .. } = event
+                        && delta.y != 0.
+                    {
+                        units += match unit {
+                            MouseWheelUnit::Point => delta.y / 40.,
+                            _ => delta.y,
+                        };
+                        return false;
+                    }
+                    true
+                });
+                input.raw_scroll_delta.y = 0.;
+                input.smooth_scroll_delta.y = 0.;
+                units
+            });
+            self.apply(volume, units, step);
+        } else {
+            self.remainder = 0.;
+        }
+        *volume != before
+    }
     pub fn control(&mut self, ui: &mut egui::Ui, volume: &mut f32, step: u8) -> bool {
         let before = *volume;
         ui.allocate_ui_with_layout(
@@ -24,29 +57,7 @@ impl Wheel {
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
                 // Consume the wheel before egui's slider can apply its default step.
-                if ui.rect_contains_pointer(ui.max_rect()) {
-                    let units = ui.input_mut(|input| {
-                        let mut units = 0.0;
-                        input.events.retain(|event| {
-                            if let Event::MouseWheel { unit, delta, .. } = event
-                                && delta.y != 0.0
-                            {
-                                units += match unit {
-                                    MouseWheelUnit::Point => delta.y / 40.0,
-                                    _ => delta.y,
-                                };
-                                return false;
-                            }
-                            true
-                        });
-                        input.raw_scroll_delta.y = 0.0;
-                        input.smooth_scroll_delta.y = 0.0;
-                        units
-                    });
-                    self.apply(volume, units, step);
-                } else {
-                    self.remainder = 0.0;
-                }
+                self.over(ui, ui.max_rect(), volume, step);
                 ui.label(format!("{:.0}%", *volume * 100.0));
                 ui.add_sized(
                     [95.0, 22.0],
@@ -64,6 +75,70 @@ impl Wheel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn artwork_scroll_is_consumed_only_over_the_image_and_accumulates_independently() {
+        let ctx = egui::Context::default();
+        let mut artwork = Wheel::default();
+        let mut slider = Wheel::default();
+        let mut volume = 0.5;
+        let mut frame = |point, delta, unit| {
+            let mut remaining = 0;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400., 300.),
+                    )),
+                    events: vec![
+                        Event::PointerMoved(point),
+                        Event::MouseWheel {
+                            unit,
+                            delta: egui::vec2(0., delta),
+                            modifiers: Default::default(),
+                        },
+                    ],
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ctx, |ui| {
+                            slider.control(ui, &mut volume, 7);
+                            let (image, _) = ui
+                                .allocate_exact_size(egui::vec2(200., 200.), egui::Sense::hover());
+                            artwork.over(ui, image, &mut volume, 7);
+                            remaining = ui.input(|input| {
+                                input
+                                    .events
+                                    .iter()
+                                    .filter(|event| matches!(event, Event::MouseWheel { .. }))
+                                    .count()
+                            });
+                        });
+                },
+            );
+            (volume, remaining)
+        };
+        frame(egui::pos2(100., 100.), 0., MouseWheelUnit::Point);
+        for _ in 0..4 {
+            assert_eq!(
+                frame(egui::pos2(100., 100.), 8., MouseWheelUnit::Point),
+                (0.5, 0)
+            );
+        }
+        assert_eq!(
+            frame(egui::pos2(100., 100.), 8., MouseWheelUnit::Point),
+            (0.57, 0)
+        );
+        assert_eq!(
+            frame(egui::pos2(300., 270.), 1., MouseWheelUnit::Line),
+            (0.57, 1)
+        );
+        assert_eq!(
+            frame(egui::pos2(100., 100.), -1., MouseWheelUnit::Line),
+            (0.5, 0)
+        );
+    }
     #[test]
     fn ui_wheel_changes_volume_only_over_the_control_and_uses_one_configured_step() {
         let ctx = egui::Context::default();

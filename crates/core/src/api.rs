@@ -51,7 +51,7 @@ fn api_error(error: ytmapi_rs::Error) -> anyhow::Error {
 fn cover(images: &[Thumbnail]) -> String {
     images
         .iter()
-        .min_by_key(|x| x.width.abs_diff(256))
+        .max_by_key(|x| x.width.saturating_mul(x.height))
         .map(|x| x.url.clone())
         .unwrap_or_default()
 }
@@ -548,6 +548,17 @@ fn config_value<T: serde::de::DeserializeOwned>(html: &str, key: &str) -> Result
 #[cfg(test)]
 mod bootstrap_tests {
     use super::config_string;
+    #[test]
+    fn artwork_selection_uses_the_largest_available_source() {
+        let thumbnails: Vec<ytmapi_rs::common::Thumbnail> =
+            serde_json::from_value(serde_json::json!([
+                {"url":"small","width":60,"height":60},
+                {"url":"medium","width":256,"height":256},
+                {"url":"large","width":1200,"height":1200}
+            ]))
+            .unwrap();
+        assert_eq!(super::cover(&thumbnails), "large");
+    }
     #[test]
     fn auth_rejections_refresh_but_do_not_prove_google_signed_out() {
         for code in [401, 403] {

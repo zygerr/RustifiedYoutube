@@ -6,6 +6,7 @@ An unofficial Windows x64 YouTube Music client. The interface, search, library, 
 
 - Browse a YouTube Music inspired native interface with dark surfaces, a persistent search field, mood filters, Listen again, Quick picks, and Discover more.
 - See consistently sized artwork: 180 px square catalog cards and 48 px covers in 64 px song rows. Wide video thumbnails are center-cropped instead of changing the layout or stretching. Long titles truncate within fixed card dimensions.
+- Load sharper artwork at up to 512 px for browsing and 1536 px for the expanded player, with HD video-thumbnail fallbacks where available. The smaller cover stays visible while HD loads. The decoded artwork cache has a 64 MiB budget; small source images are never artificially enlarged.
 
 - Start streaming without downloading and remuxing an entire track first. The YouTube engine warms up when the app opens and stays alive between tracks. Actual startup time still depends on YouTube, the connection, and any normal playback restrictions.
 - Click the current song or artwork in the bottom-left player bar to open the expanded player.
@@ -42,6 +43,8 @@ Use the native player bar or tray menu. `Ctrl+Alt+Space` toggles playback and `C
 
 Scroll up/down over the volume slider or percentage. **Settings → Playback → Volume step per scroll notch** accepts an integer from **1% to 100%**, with a default of 5%. Volume remains within 0–100%, and the step is saved across launches.
 
+The same scroll step also works over the current-song thumbnail in the footer and the large artwork in the expanded Audio player. Hovering the large cover shows the volume percentage. Scrolling over it adjusts volume without scrolling the page or the upcoming queue.
+
 The saved volume is applied before playback starts and limits new audio/video sources immediately. Lower levels used by YouTube's loudness normalization are preserved.
 
 ## Discord Rich Presence
@@ -71,6 +74,7 @@ cargo run -p rustified-core --example smoke -- --authenticated
 ./target/debug/RustifiedYoutube.exe --smoke-stream
 ./target/debug/RustifiedYoutube.exe --smoke-rpc
 ./target/debug/RustifiedYoutube.exe --smoke-account
+./target/debug/RustifiedYoutube.exe --smoke-artwork
 ```
 
 The streaming check opens a temporary app instance with volume zero, measures two real streams, verifies video dimensions, pause, seek confirmation, and Audio/Video switching, then closes. It does not change saved UI preferences. Unit tests cover full title and history parsing, artist ranking, styled-title glyph coverage, volume wheel interaction, seek interaction and width, shuffle order, and media bridge restrictions.
@@ -78,6 +82,8 @@ The streaming check opens a temporary app instance with volume zero, measures tw
 The RPC check verifies the real Discord handshake and acknowledgement of a clear-activity command without displaying a test song. Unit tests also cover presence timestamps, pause/ad clearing, Unicode limits, fragmented IPC frames, pings, and immediate volume protection.
 
 The account check restores the current profile, reads library/history counts without logging their names, refreshes the connection, and exits. It never opens an interactive Google login, starts music, publishes Discord presence, or changes saved UI preferences. Running it again checks restoration across app restarts. The streaming check also refreshes an existing account during playback and verifies that the current track and position are preserved.
+
+The artwork check fetches public album/video images, verifies that the expanded images retain more resolution than browsing images, and prints dimensions only. Unit tests cover high-resolution source selection, URL fallbacks, bounded decoding, and artwork wheel behavior alongside the volume slider.
 
 Debug builds also support offline visual snapshots:
 
