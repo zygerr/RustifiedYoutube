@@ -1,6 +1,9 @@
 # Rust build output
 /target/
 **/target/
+/node_modules/
+/dist/
+/src-tauri/gen/
 
 # Local secrets and configuration
 .env
