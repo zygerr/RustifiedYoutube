@@ -12,8 +12,10 @@ use std::{
     time::Duration,
 };
 
-use crate::catalog_ui::{self as catalog, BG, BRAND, MUTED, PANEL, TEXT};
-const ACCENT: Color32 = TEXT;
+use crate::{
+    catalog_ui as catalog,
+    theme::{self, Theme},
+};
 
 #[derive(Clone, PartialEq)]
 enum Page {
@@ -27,6 +29,7 @@ enum Page {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Preferences {
+    theme: Theme,
     volume: Option<f32>,
     recent: Vec<Track>,
     close_to_tray: Option<bool>,
@@ -118,15 +121,6 @@ impl MusicApp {
         let ctx = &cc.egui_ctx;
         crate::fonts::install(ctx);
         let mut style = (*ctx.style()).clone();
-        style.visuals = egui::Visuals::dark();
-        style.visuals.panel_fill = BG;
-        style.visuals.window_fill = PANEL;
-        style.visuals.override_text_color = Some(TEXT);
-        style.visuals.selection.bg_fill = ACCENT.gamma_multiply(0.25);
-        style.visuals.selection.stroke.color = ACCENT;
-        style.visuals.widgets.inactive.bg_fill = Color32::from_gray(35);
-        style.visuals.widgets.hovered.bg_fill = Color32::from_gray(50);
-        style.visuals.widgets.active.bg_fill = Color32::from_gray(65);
         style.spacing.item_spacing = Vec2::new(10., 10.);
         style.spacing.button_padding = Vec2::new(14., 9.);
         style
@@ -140,6 +134,9 @@ impl MusicApp {
             .storage
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
+        crate::preview::theme()
+            .unwrap_or(preferences.theme)
+            .apply(ctx);
         let volume = preferences.volume.unwrap_or(0.5);
         let shuffle = preferences.shuffle.unwrap_or(false);
         let (tray_tx, tray_rx) = mpsc::channel();
@@ -221,6 +218,7 @@ impl MusicApp {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
+        self.preferences.theme = crate::preview::theme().unwrap_or_default();
         self.page = match snapshot.page.as_str() {
             "library" => Page::Library,
             "search" => Page::Tracks("Search results".into()),
@@ -647,6 +645,7 @@ impl MusicApp {
         response
     }
     fn artwork_volume(&mut self, ui: &mut egui::Ui, response: egui::Response, large: bool) {
+        let colors = crate::theme::palette(ui.ctx());
         let rect = response.rect;
         let step = self.preferences.volume_scroll_step.unwrap_or(5);
         let wheel = if large {
@@ -670,7 +669,7 @@ impl MusicApp {
                 egui::Align2::CENTER_CENTER,
                 format!("{:.0}%", self.volume * 100.),
                 FontId::proportional(14.),
-                TEXT,
+                colors.text,
             );
         }
         response.on_hover_text(format!(
@@ -681,6 +680,7 @@ impl MusicApp {
     }
 
     fn nav(ui: &mut egui::Ui, text: &str, icon: Icon, selected: bool) -> bool {
+        let colors = crate::theme::palette(ui.ctx());
         let (rect, response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.), Sense::click());
         response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, text));
@@ -689,13 +689,17 @@ impl MusicApp {
                 rect,
                 8.,
                 if selected {
-                    Color32::from_gray(32)
+                    colors.selected
                 } else {
-                    Color32::from_gray(24)
+                    colors.hover
                 },
             );
         }
-        let color = if selected { ACCENT } else { MUTED };
+        let color = if selected {
+            colors.accent
+        } else {
+            colors.muted
+        };
         icons::draw(
             ui.painter(),
             egui::Rect::from_center_size(rect.left_center() + Vec2::new(20., 0.), Vec2::splat(22.)),
@@ -713,21 +717,25 @@ impl MusicApp {
     }
 
     fn sidebar(&mut self, ctx: &egui::Context) {
+        let colors = crate::theme::palette(ctx);
         egui::SidePanel::left("navigation")
             .exact_width(224.)
             .frame(
                 egui::Frame::new()
-                    .fill(BG)
-                    .stroke(egui::Stroke::new(1_f32, Color32::from_gray(35)))
+                    .fill(colors.background)
+                    .stroke(egui::Stroke::new(1_f32, colors.border))
                     .inner_margin(12),
             )
             .show(ctx, |ui| {
                 ui.add_space(12.);
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.), Sense::hover());
-                    ui.painter()
-                        .circle_stroke(rect.center(), 12., egui::Stroke::new(2_f32, BRAND));
-                    icons::draw(ui.painter(), rect.shrink(6.), Icon::Play, BRAND);
+                    ui.painter().circle_stroke(
+                        rect.center(),
+                        12.,
+                        egui::Stroke::new(2_f32, colors.progress),
+                    );
+                    icons::draw(ui.painter(), rect.shrink(6.), Icon::Play, colors.progress);
                     ui.label(RichText::new("Rustified Music").size(18.).strong());
                 });
                 ui.add_space(3.);
@@ -764,7 +772,7 @@ impl MusicApp {
                 ui.label(
                     RichText::new("YOUR PLAYLISTS")
                         .size(10.)
-                        .color(MUTED)
+                        .color(colors.muted)
                         .strong(),
                 );
                 ui.add_space(8.);
@@ -777,9 +785,11 @@ impl MusicApp {
                             if ui
                                 .add_sized(
                                     [ui.available_width(), 28.],
-                                    egui::Button::new(RichText::new(&playlist.title).color(MUTED))
-                                        .frame(false)
-                                        .truncate(),
+                                    egui::Button::new(
+                                        RichText::new(&playlist.title).color(colors.muted),
+                                    )
+                                    .frame(false)
+                                    .truncate(),
                                 )
                                 .on_hover_text(&playlist.title)
                                 .clicked()
@@ -795,7 +805,7 @@ impl MusicApp {
                                     "Connect to bring your playlists."
                                 })
                                 .size(12.)
-                                .color(MUTED),
+                                .color(colors.muted),
                             );
                         }
                     });
@@ -804,7 +814,7 @@ impl MusicApp {
                         .button(
                             RichText::new(format!("v{}  ·  About", env!("CARGO_PKG_VERSION")))
                                 .small()
-                                .color(MUTED),
+                                .color(colors.muted),
                         )
                         .clicked()
                     {
@@ -823,7 +833,7 @@ impl MusicApp {
                                 "●  Checking playback session…"
                             })
                             .small()
-                            .color(ACCENT),
+                            .color(colors.accent),
                         )
                         .on_hover_text(&self.account_status);
                     } else if ui
@@ -847,11 +857,12 @@ impl MusicApp {
     }
 
     fn player_bar(&mut self, ctx: &egui::Context) {
+        let colors = crate::theme::palette(ctx);
         egui::TopBottomPanel::bottom("player")
             .exact_height(136.)
             .frame(
                 egui::Frame::new()
-                    .fill(PANEL)
+                    .fill(colors.panel)
                     .inner_margin(egui::Margin::symmetric(24, 14)),
             )
             .show(ctx, |ui| {
@@ -871,13 +882,17 @@ impl MusicApp {
                                     .on_hover_text(&track.title);
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(&track.artist).small().color(MUTED),
+                                            RichText::new(&track.artist)
+                                                .small()
+                                                .color(colors.muted),
                                         )
                                         .truncate(),
                                     );
                                 });
                             } else {
-                                ui.label(RichText::new("Find your next favorite.").color(MUTED));
+                                ui.label(
+                                    RichText::new("Find your next favorite.").color(colors.muted),
+                                );
                             }
                         },
                     );
@@ -915,7 +930,7 @@ impl MusicApp {
                                     ui.painter().circle_filled(
                                         shuffle.rect.center_bottom() + Vec2::new(0., 2.),
                                         2.,
-                                        ACCENT,
+                                        colors.accent,
                                     );
                                 }
                                 if icons::button(ui, Icon::Previous, "Previous track", 36., false)
@@ -962,7 +977,7 @@ impl MusicApp {
                                     ui.painter().circle_filled(
                                         response.rect.center_bottom() + Vec2::new(0., 2.),
                                         2.,
-                                        ACCENT,
+                                        colors.accent,
                                     );
                                 }
                             });
@@ -987,7 +1002,7 @@ impl MusicApp {
                                 Vec2::splat(20.),
                             ),
                             Icon::Volume,
-                            MUTED,
+                            colors.muted,
                         );
                     });
                 });
@@ -996,6 +1011,7 @@ impl MusicApp {
     }
 
     fn timeline_ui(&mut self, ui: &mut egui::Ui, id: &str) {
+        let colors = crate::theme::palette(ui.ctx());
         ui.horizontal(|ui| {
             let clock_width = 48.;
             ui.add_sized(
@@ -1003,7 +1019,7 @@ impl MusicApp {
                 egui::Label::new(
                     RichText::new(format_time(self.timeline.position(self.state.position)))
                         .size(11.)
-                        .color(MUTED),
+                        .color(colors.muted),
                 ),
             );
             let width = (ui.available_width() - clock_width - ui.spacing().item_spacing.x).max(1.);
@@ -1029,7 +1045,7 @@ impl MusicApp {
                 egui::Label::new(
                     RichText::new(format_time(self.state.duration))
                         .size(11.)
-                        .color(MUTED),
+                        .color(colors.muted),
                 ),
             );
             if let Some(target) = seek {
@@ -1095,9 +1111,10 @@ impl MusicApp {
     }
 
     fn recent_ui(&mut self, ui: &mut egui::Ui) {
+        let colors = crate::theme::palette(ui.ctx());
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(RichText::new("YOUR MUSIC").size(11.).color(MUTED));
+                ui.label(RichText::new("YOUR MUSIC").size(11.).color(colors.muted));
                 ui.label(RichText::new("Listen again").size(30.).strong());
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1119,7 +1136,7 @@ impl MusicApp {
         });
         ui.add_space(16.);
         if let Some(message) = &self.history_error {
-            ui.label(RichText::new(message).small().color(MUTED));
+            ui.label(RichText::new(message).small().color(colors.muted));
         }
         let recent = self.recent_tracks();
         if recent.is_empty() {
@@ -1129,7 +1146,7 @@ impl MusicApp {
                 } else {
                     "Your recently played songs will appear here."
                 })
-                .color(MUTED),
+                .color(colors.muted),
             );
         } else {
             self.song_shelf(ui, "recent_tracks", &recent);
@@ -1175,6 +1192,7 @@ impl MusicApp {
     }
 
     fn discover_ui(&mut self, ui: &mut egui::Ui) {
+        let colors = crate::theme::palette(ui.ctx());
         egui::ScrollArea::vertical()
             .id_salt("discover_page")
             .auto_shrink([false, false])
@@ -1206,7 +1224,11 @@ impl MusicApp {
                 ui.add_space(32.);
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("START WITH A SONG").size(11.).color(MUTED));
+                        ui.label(
+                            RichText::new("START WITH A SONG")
+                                .size(11.)
+                                .color(colors.muted),
+                        );
                         ui.label(RichText::new("Quick picks").size(30.).strong());
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1224,9 +1246,9 @@ impl MusicApp {
                 ui.add_space(16.);
                 if self.discover_loading {
                     ui.spinner();
-                    ui.label(RichText::new("Finding your music…").color(MUTED));
+                    ui.label(RichText::new("Finding your music…").color(colors.muted));
                 } else if let Some(message) = self.discover_error.clone() {
-                    ui.label(RichText::new(message).color(MUTED));
+                    ui.label(RichText::new(message).color(colors.muted));
                     if ui.button("Try again").clicked() {
                         self.discover_loading = true;
                         self.backend.send(Request::Discover);
@@ -1272,6 +1294,7 @@ impl MusicApp {
     }
 
     fn tracks_ui(&mut self, ui: &mut egui::Ui, from_queue: bool) {
+        let colors = crate::theme::palette(ui.ctx());
         let count = if from_queue {
             self.queue.len()
         } else {
@@ -1284,12 +1307,12 @@ impl MusicApp {
                 } else {
                     "No tracks found. Try another search."
                 })
-                .color(MUTED),
+                .color(colors.muted),
             );
             return;
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("{count} songs")).color(MUTED));
+            ui.label(RichText::new(format!("{count} songs")).color(colors.muted));
             if ui
                 .add(egui::Button::new("▶  Play all").corner_radius(20))
                 .clicked()
@@ -1335,10 +1358,11 @@ impl MusicApp {
     }
 
     fn library_ui(&mut self, ui: &mut egui::Ui) {
+        let colors = crate::theme::palette(ui.ctx());
         if !self.connected {
             ui.label(
                 RichText::new("Connect your account to see playlists and liked songs.")
-                    .color(MUTED),
+                    .color(colors.muted),
             );
             if ui
                 .add_enabled(!self.connecting, egui::Button::new("Continue with Google"))
@@ -1366,7 +1390,7 @@ impl MusicApp {
         });
         ui.add_space(24.);
         if self.playlists.is_empty() {
-            ui.label(RichText::new("Your playlists will appear here. Reconnect in Settings if your library couldn't load.").color(MUTED));
+            ui.label(RichText::new("Your playlists will appear here. Reconnect in Settings if your library couldn't load.").color(colors.muted));
             return;
         }
         let playlists = self.playlists.clone();
@@ -1631,6 +1655,7 @@ impl MusicApp {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
     fn expanded_ui(&mut self, ui: &mut egui::Ui) {
+        let colors = crate::theme::palette(ui.ctx());
         ui.horizontal(|ui| {
             if ui.button("← Back").clicked() {
                 self.expanded = false;
@@ -1650,7 +1675,7 @@ impl MusicApp {
         });
         ui.add_space(16.);
         if let Some(message) = self.error.clone() {
-            ui.colored_label(ACCENT, message);
+            ui.colored_label(colors.accent, message);
             if ui.button("Retry playback").clicked()
                 && let Some(index) = self.current
             {
@@ -1692,7 +1717,7 @@ impl MusicApp {
                     self.timeline_ui(ui, "expanded_timeline");
                     ui.add_space(12.);
                     ui.add(egui::Label::new(RichText::new(&track.title).size(22.).strong()).wrap());
-                    ui.label(RichText::new(&track.artist).size(16.).color(MUTED));
+                    ui.label(RichText::new(&track.artist).size(16.).color(colors.muted));
                     if self.state.buffering {
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -1701,7 +1726,8 @@ impl MusicApp {
                     }
                     if self.video_mode && self.state.playing && !self.state.video_available {
                         ui.label(
-                            RichText::new("This track has no music video available.").color(MUTED),
+                            RichText::new("This track has no music video available.")
+                                .color(colors.muted),
                         );
                     }
                 },
@@ -1717,11 +1743,11 @@ impl MusicApp {
                     ui.label(
                         RichText::new(format!("{count} tracks in queue"))
                             .small()
-                            .color(MUTED),
+                            .color(colors.muted),
                     );
                     ui.add_space(12.);
                     if count == 0 {
-                        ui.label(RichText::new("Add songs to keep listening.").color(MUTED));
+                        ui.label(RichText::new("Add songs to keep listening.").color(colors.muted));
                     }
                     ui.scope(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.;
@@ -1749,7 +1775,7 @@ impl MusicApp {
             let width = (ui.available_width() - 60.).clamp(220., 660.);
             let mut submit = false;
             egui::Frame::new()
-                .fill(Color32::from_gray(35))
+                .fill(crate::theme::palette(ui.ctx()).surface)
                 .corner_radius(9)
                 .inner_margin(egui::Margin::symmetric(12, 6))
                 .show(ui, |ui| {
@@ -1808,7 +1834,23 @@ impl MusicApp {
         }
     }
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
+        let colors = crate::theme::palette(ui.ctx());
         ui.add_space(15.);
+        ui.heading("Appearance");
+        ui.add_space(6.);
+        ui.label(
+            RichText::new(
+                "Choose your theme. Changes apply instantly and are saved automatically.",
+            )
+            .small()
+            .color(colors.muted),
+        );
+        ui.add_space(12.);
+        if let Some(selected) = theme::selector(ui, self.preferences.theme) {
+            self.preferences.theme = selected;
+            selected.apply(ui.ctx());
+        }
+        ui.add_space(28.);
         ui.heading("Account");
         ui.add_space(8.);
         ui.label(&self.account_status);
@@ -1820,7 +1862,7 @@ impl MusicApp {
             Some(false) => "Playback account: guest",
             None => "Playback account: checking…",
         });
-        ui.label(RichText::new("Your saved account is restored automatically. Google sign-in opens only when needed.").small().color(MUTED));
+        ui.label(RichText::new("Your saved account is restored automatically. Google sign-in opens only when needed.").small().color(colors.muted));
         if ui
             .add_enabled(
                 !self.connecting,
@@ -1886,8 +1928,12 @@ impl MusicApp {
         {
             self.preferences.discord_rpc = Some(enabled);
         }
-        ui.label(RichText::new("Shares the song, artist, artwork and progress while playing. Hides on pause or during ads.").small().color(MUTED));
-        ui.label(RichText::new(&self.discord.status).color(if enabled { ACCENT } else { MUTED }));
+        ui.label(RichText::new("Shares the song, artist, artwork and progress while playing. Hides on pause or during ads.").small().color(colors.muted));
+        ui.label(RichText::new(&self.discord.status).color(if enabled {
+            colors.accent
+        } else {
+            colors.muted
+        }));
         ui.collapsing("Application settings", |ui| {
             let mut id = self
                 .preferences
@@ -1904,7 +1950,7 @@ impl MusicApp {
                 }
             });
             if !crate::discord::valid_application_id(&id) {
-                ui.colored_label(ACCENT, "Use the public numeric Application ID.");
+                ui.colored_label(colors.accent, "Use the public numeric Application ID.");
             }
             ui.hyperlink_to(
                 "Discord Developer Portal",
@@ -1926,6 +1972,7 @@ impl MusicApp {
 
 impl eframe::App for MusicApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let colors = crate::theme::palette(ctx);
         self.receive(ctx);
         self.check_stream(ctx);
         self.check_account(ctx);
@@ -1967,7 +2014,7 @@ impl eframe::App for MusicApp {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(BG)
+                    .fill(colors.background)
                     .inner_margin(egui::Margin::symmetric(30, 24)),
             )
             .show(ctx, |ui| {
@@ -1990,7 +2037,7 @@ impl eframe::App for MusicApp {
                 }
                 if let Some(message) = self.error.clone() {
                     egui::Frame::new()
-                        .fill(Color32::from_rgb(55, 20, 24))
+                        .fill(colors.error)
                         .corner_radius(8)
                         .inner_margin(12)
                         .show(ui, |ui| {
@@ -2026,7 +2073,8 @@ impl eframe::App for MusicApp {
             .show(ctx, |ui| {
                 ui.heading("RustifiedYoutube");
                 ui.label(
-                    RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).color(ACCENT),
+                    RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                        .color(colors.accent),
                 );
                 ui.label("Your music. Your desktop.");
                 ui.add_space(12.);

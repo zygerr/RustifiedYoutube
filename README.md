@@ -15,6 +15,7 @@ An unofficial Windows x64 YouTube Music client. The interface, search, library, 
 - View and play upcoming queue entries in the right-hand panel. Back returns to search or the library without stopping playback.
 - Render styled Unicode song titles, symbols, and emoji with fallback fonts installed by Windows. Windows font files are read locally and are not redistributed.
 - Search both songs and videos, filter All/Songs/Videos, and prioritize matching artists while keeping full titles.
+- Choose **Settings → Appearance** for **Classic**, **Purple Haze** (dark plum and lavender), or **OLED** (pure black main surfaces and player). Theme changes apply immediately and are saved between launches.
 - Connect a Google account to access playlists, liked songs, and like/unlike actions.
 - Find account listening history and locally remembered plays in **Discover → Listen again**. Click a card to play; Refresh reloads account history.
 - Seek on the full-width bottom rail or the rail below the expanded media panel. Click or drag to seek; focus the rail and use Left/Right to move five seconds.
@@ -85,6 +86,8 @@ The streaming check opens a temporary app instance with volume zero, measures tw
 The RPC check verifies the real Discord handshake and acknowledgement of a clear-activity command without displaying a test song. Unit tests also cover presence timestamps, pause/ad clearing, Unicode limits, fragmented IPC frames, pings, and immediate volume protection.
 
 The player-session check verifies Google sign-in in the actual playback document and fails when it is anonymous. The account check requires this same browser authentication, restores the current profile, reads library/history counts without logging their names, refreshes the connection, and exits. It never opens an interactive Google login, starts music, publishes Discord presence, or changes saved UI preferences. Running it again checks restoration across app restarts. The streaming check also refreshes an existing account during playback and verifies that the current track and position are preserved.
+
+UI snapshots accept `--theme purple` or `--theme oled` alongside `--ui-snapshot <page>` and optional `--compact`; they use fixture data and do not access your account.
 
 The artwork check fetches public album/video images, verifies that the expanded images retain more resolution than browsing images, and prints dimensions only. Unit tests cover high-resolution source selection, URL fallbacks, bounded decoding, and artwork wheel behavior alongside the volume slider.
 

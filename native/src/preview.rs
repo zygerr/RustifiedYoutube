@@ -9,6 +9,22 @@ use std::{
 pub fn active() -> bool {
     cfg!(debug_assertions) && std::env::args().any(|arg| arg == "--ui-snapshot")
 }
+pub fn theme() -> Option<crate::theme::Theme> {
+    if !active() {
+        return None;
+    }
+    Some(
+        match std::env::args()
+            .skip_while(|arg| arg != "--theme")
+            .nth(1)
+            .as_deref()
+        {
+            Some("purple") => crate::theme::Theme::PurpleHaze,
+            Some("oled") => crate::theme::Theme::Oled,
+            _ => crate::theme::Theme::Classic,
+        },
+    )
+}
 pub fn compact() -> bool {
     active() && std::env::args().any(|arg| arg == "--compact")
 }
@@ -71,8 +87,13 @@ impl Snapshot {
         if let Some(image) = image {
             let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/ui-preview");
             let name = format!(
-                "{}-{}.png",
+                "{}-{}-{}.png",
                 self.page,
+                match theme().unwrap_or_default() {
+                    crate::theme::Theme::Classic => "classic",
+                    crate::theme::Theme::PurpleHaze => "purple",
+                    crate::theme::Theme::Oled => "oled",
+                },
                 if compact() { "1080" } else { "1440" }
             );
             let output = directory.join(name);

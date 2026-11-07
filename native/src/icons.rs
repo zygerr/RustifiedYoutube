@@ -152,26 +152,23 @@ pub fn button(
     size: f32,
     accent: bool,
 ) -> egui::Response {
+    let colors = crate::theme::palette(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
     });
     if accent {
-        ui.painter().circle_filled(
-            rect.center(),
-            size / 2. - 1.,
-            Color32::from_rgb(241, 241, 241),
-        );
-    } else if response.hovered() {
         ui.painter()
-            .rect_filled(rect, 8., Color32::from_rgb(44, 47, 56));
+            .circle_filled(rect.center(), size / 2. - 1., colors.accent);
+    } else if response.hovered() {
+        ui.painter().rect_filled(rect, 8., colors.hover);
     }
     draw(
         ui.painter(),
         rect,
         icon,
         if accent {
-            Color32::from_rgb(3, 3, 3)
+            colors.on_accent
         } else {
             ui.visuals().text_color()
         },

@@ -2,11 +2,6 @@ use crate::icons::{self, Icon};
 use eframe::egui::{self, Color32, FontId, Rect, Response, Sense, Vec2, pos2};
 use rustified_core::model::Track;
 
-pub const BG: Color32 = Color32::from_rgb(3, 3, 3);
-pub const PANEL: Color32 = Color32::from_rgb(18, 18, 18);
-pub const TEXT: Color32 = Color32::from_rgb(241, 241, 241);
-pub const MUTED: Color32 = Color32::from_rgb(170, 170, 170);
-pub const BRAND: Color32 = Color32::from_rgb(255, 0, 51);
 pub const CARD_ART: f32 = 180.;
 pub const CARD_HEIGHT: f32 = 248.;
 pub const CARD_GAP: f32 = 24.;
@@ -33,12 +28,13 @@ pub fn cover(ui: &egui::Ui, rect: Rect, texture: Option<&egui::TextureHandle>) {
             .corner_radius(3)
             .paint_at(ui, rect);
     } else {
-        ui.painter().rect_filled(rect, 3., Color32::from_gray(35));
+        ui.painter()
+            .rect_filled(rect, 3., crate::theme::palette(ui.ctx()).surface);
         icons::draw(
             ui.painter(),
             Rect::from_center_size(rect.center(), Vec2::splat(24.)),
             Icon::Play,
-            Color32::from_gray(105),
+            crate::theme::palette(ui.ctx()).muted,
         );
     }
 }
@@ -66,6 +62,7 @@ pub fn card(
     texture: Option<&egui::TextureHandle>,
     action: &str,
 ) -> Response {
+    let colors = crate::theme::palette(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(Vec2::new(CARD_ART, CARD_HEIGHT), Sense::hover());
     let response = ui
         .interact(rect, id, Sense::click())
@@ -78,12 +75,12 @@ pub fn card(
             ui.painter()
                 .rect_filled(image, 3., Color32::from_black_alpha(65));
             let center = image.right_bottom() - Vec2::splat(28.);
-            ui.painter().circle_filled(center, 22., TEXT);
+            ui.painter().circle_filled(center, 22., colors.text);
             icons::draw(
                 ui.painter(),
                 Rect::from_center_size(center, Vec2::splat(24.)),
                 Icon::Play,
-                BG,
+                colors.background,
             );
         }
         label(
@@ -94,7 +91,7 @@ pub fn card(
             ),
             title,
             15.,
-            TEXT,
+            colors.text,
             2,
         );
         label(
@@ -105,7 +102,7 @@ pub fn card(
             ),
             subtitle,
             13.,
-            MUTED,
+            colors.muted,
             1,
         );
     }
@@ -127,6 +124,7 @@ pub fn song_row(
     active: bool,
     actions: bool,
 ) -> Option<SongAction> {
+    let colors = crate::theme::palette(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().max(1.), ROW_HEIGHT),
         Sense::hover(),
@@ -144,15 +142,22 @@ pub fn song_row(
     let mut action = None;
     if ui.is_rect_visible(rect) {
         if active || response.hovered() || response.has_focus() {
-            ui.painter()
-                .rect_filled(rect, 4., Color32::from_gray(if active { 29 } else { 22 }));
+            ui.painter().rect_filled(
+                rect,
+                4.,
+                if active {
+                    colors.selected
+                } else {
+                    colors.hover
+                },
+            );
         }
         let image = Rect::from_min_size(rect.min + Vec2::new(8., 8.), Vec2::splat(ROW_ART));
         cover(ui, image, texture);
         if response.hovered() {
             ui.painter()
                 .rect_filled(image, 3., Color32::from_black_alpha(130));
-            icons::draw(ui.painter(), image, Icon::Play, TEXT);
+            icons::draw(ui.painter(), image, Icon::Play, colors.text);
         }
         let reserve = if actions {
             136.
@@ -170,7 +175,7 @@ pub fn song_row(
             ),
             &track.title,
             14.,
-            TEXT,
+            colors.text,
             1,
         );
         label(
@@ -181,7 +186,7 @@ pub fn song_row(
             ),
             &track.artist,
             12.,
-            MUTED,
+            colors.muted,
             1,
         );
         if actions {
@@ -210,16 +215,16 @@ pub fn song_row(
                 });
                 if response.hovered() {
                     ui.painter()
-                        .circle_filled(button.center(), 15., Color32::from_gray(55));
+                        .circle_filled(button.center(), 15., colors.hover);
                 }
                 icons::draw(
                     ui.painter(),
                     button,
                     icon,
                     if track.liked && result == SongAction::Like {
-                        TEXT
+                        colors.text
                     } else {
-                        MUTED
+                        colors.muted
                     },
                 );
                 if response.clicked() {
@@ -239,7 +244,7 @@ pub fn song_row(
                 ),
                 &track.duration,
                 12.,
-                MUTED,
+                colors.muted,
                 1,
             );
         }
@@ -325,12 +330,12 @@ mod tests {
             |ctx| {
                 let wide = ctx.load_texture(
                     "wide",
-                    egui::ColorImage::filled([32, 18], TEXT),
+                    egui::ColorImage::filled([32, 18], Color32::WHITE),
                     Default::default(),
                 );
                 let square = ctx.load_texture(
                     "square",
-                    egui::ColorImage::filled([32, 32], TEXT),
+                    egui::ColorImage::filled([32, 32], Color32::WHITE),
                     Default::default(),
                 );
                 egui::CentralPanel::default().show(ctx, |ui| {

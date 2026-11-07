@@ -11,6 +11,7 @@ mod playback_session;
 mod player;
 mod preview;
 mod queue;
+mod theme;
 mod timeline;
 mod volume;
 

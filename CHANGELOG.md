@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.7
+
+- Add three native appearance themes in Settings: Classic, Purple Haze, and OLED, with clickable palette previews.
+- Apply themes to navigation, search, catalog cards and rows, playback controls, the seek rail, dialogs, and standard widgets.
+- Use deep purple surfaces and lavender accents for Purple Haze; keep the main surfaces and player background pure black in OLED.
+- Apply theme changes immediately and save the choice with existing preferences, preserving Classic for previous installations.
+- Extend isolated UI snapshots with theme selection for visual checks at desktop and compact sizes.
+
 ## 0.3.6
 
 - Verify the actual playback page's Google login independently of the native library's saved API cookies.
