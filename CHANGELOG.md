@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.13
+
+- Upgrade an existing legacy installation in place so Start Menu shortcuts and Windows relaunches open the native Rust interface.
+- Keep a native executable at the legacy filename, refresh the legacy Start Menu shortcut, and update installation metadata without changing account data or enabling automatic startup.
+
 ## 0.3.12
 
 - Center search text and its placeholder vertically with the search icon.

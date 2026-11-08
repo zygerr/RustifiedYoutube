@@ -3,8 +3,9 @@ Unicode true
 !include "x64.nsh"
 Name "RustifiedYoutube"
 OutFile "${OUTPUT_FILE}"
-InstallDir "$LOCALAPPDATA\Programs\RustifiedYoutube"
-InstallDirRegKey HKCU "Software\RustifiedYoutube" "InstallDir"
+; Resolve defaults in .onInit so a caller's /D= always wins, even when it
+; explicitly selects the normal new-install directory during legacy migration.
+InstallDir ""
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 VIProductVersion "${APP_VERSION}.0"
@@ -27,12 +28,26 @@ Function .onInit
     MessageBox MB_OK|MB_ICONSTOP "RustifiedYoutube requires 64-bit Windows."
     Abort
   ${EndIf}
+  ${If} $INSTDIR == ""
+    ReadRegStr $INSTDIR HKCU "Software\RustifiedYoutube" "InstallDir"
+    ${If} $INSTDIR == ""
+      IfFileExists "$LOCALAPPDATA\RustifiedYoutube\rustified-youtube.exe" 0 new_install_directory
+        StrCpy $INSTDIR "$LOCALAPPDATA\RustifiedYoutube"
+        Goto install_directory_ready
+      new_install_directory:
+        StrCpy $INSTDIR "$LOCALAPPDATA\Programs\RustifiedYoutube"
+      install_directory_ready:
+    ${EndIf}
+  ${EndIf}
 FunctionEnd
 
 Section "RustifiedYoutube" SEC_APP
   SetShellVarContext current
   SetOutPath "$INSTDIR"
   File "${STAGE_DIR}\RustifiedYoutube.exe"
+  ; Old shortcuts and Windows session restoration may still use this name.
+  ; Both names launch the same native client; never retain the web wrapper.
+  File /oname=rustified-youtube.exe "${STAGE_DIR}\RustifiedYoutube.exe"
   File "${STAGE_DIR}\rustified-auth.exe"
   File "${STAGE_DIR}\RUST-DEPENDENCIES.txt"
   File "${STAGE_DIR}\THIRD-PARTY-NOTICES.md"
@@ -40,9 +55,14 @@ Section "RustifiedYoutube" SEC_APP
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   CreateShortcut "$SMPROGRAMS\RustifiedYoutube.lnk" "$INSTDIR\RustifiedYoutube.exe"
   CreateShortcut "$DESKTOP\RustifiedYoutube.lnk" "$INSTDIR\RustifiedYoutube.exe"
+  IfFileExists "$SMPROGRAMS\RustifiedYoutube\RustifiedYoutube.lnk" 0 legacy_shortcut_ready
+    CreateShortcut "$SMPROGRAMS\RustifiedYoutube\RustifiedYoutube.lnk" "$INSTDIR\RustifiedYoutube.exe"
+  legacy_shortcut_ready:
   WriteRegStr HKCU "Software\RustifiedYoutube" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RustifiedYoutube" "DisplayName" "RustifiedYoutube"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RustifiedYoutube" "DisplayVersion" "${APP_VERSION}"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RustifiedYoutube" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RustifiedYoutube" "MainBinaryName" "RustifiedYoutube.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RustifiedYoutube" "DisplayIcon" "$INSTDIR\RustifiedYoutube.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RustifiedYoutube" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RustifiedYoutube" "NoModify" 1
@@ -53,7 +73,10 @@ Section "Uninstall"
   SetShellVarContext current
   Delete "$SMPROGRAMS\RustifiedYoutube.lnk"
   Delete "$DESKTOP\RustifiedYoutube.lnk"
+  Delete "$SMPROGRAMS\RustifiedYoutube\RustifiedYoutube.lnk"
+  RMDir "$SMPROGRAMS\RustifiedYoutube"
   Delete "$INSTDIR\RustifiedYoutube.exe"
+  Delete "$INSTDIR\rustified-youtube.exe"
   Delete "$INSTDIR\rustified-auth.exe"
   Delete "$INSTDIR\yt-dlp.exe"
   Delete "$INSTDIR\node.exe"

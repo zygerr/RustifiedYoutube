@@ -116,6 +116,8 @@ Supported pages are `discover`, `library`, `search`, `queue`, `player`, and `set
 
 ## Releases
 
+Run the Windows installer to update the installed application and its shortcuts. Launching a portable build from the project folder does not replace an older installation. The installer upgrades the legacy `%LOCALAPPDATA%\RustifiedYoutube` installation in place when present and preserves its old executable filename as a native compatibility entry point. Account data and startup preferences are preserved.
+
 The [Windows workflow](https://github.com/zygerr/RustifiedYoutube/actions/workflows/windows.yml) checks and builds pushes to `main` and pull requests. Change the workspace version in `Cargo.toml`, update `Cargo.lock`, and push a matching tag to create a **draft** [GitHub Release](https://github.com/zygerr/RustifiedYoutube/releases) with installer, portable ZIP, and checksums. Private releases require repository access.
 
 ## Local data
