@@ -3,7 +3,7 @@ use eframe::egui::{self, Color32, FontId, Rect, Response, Sense, Vec2, pos2};
 use rustified_core::model::Track;
 
 pub const CARD_ART: f32 = 180.;
-pub const CARD_HEIGHT: f32 = 248.;
+pub const CARD_HEIGHT: f32 = 256.;
 pub const CARD_GAP: f32 = 24.;
 pub const ROW_ART: f32 = 48.;
 pub const ROW_HEIGHT: f32 = 64.;
@@ -30,13 +30,64 @@ pub fn cover(ui: &egui::Ui, rect: Rect, texture: Option<&egui::TextureHandle>) {
     } else {
         ui.painter()
             .rect_filled(rect, 3., crate::theme::palette(ui.ctx()).surface);
-        icons::draw(
-            ui.painter(),
-            Rect::from_center_size(rect.center(), Vec2::splat(24.)),
-            Icon::Play,
-            crate::theme::palette(ui.ctx()).muted,
+        let colors = crate::theme::palette(ui.ctx());
+        let radius = (rect.width() * 0.18).clamp(7., 30.);
+        ui.painter().circle_stroke(
+            rect.center(),
+            radius,
+            egui::Stroke::new(1.5_f32, colors.border),
         );
+        ui.painter().circle_filled(rect.center(), 3., colors.muted);
     }
+}
+
+/// Static placeholders reserve the final catalog geometry without an animated
+/// spinner or a layout jump when artwork and metadata arrive.
+pub fn skeleton_rows(ui: &mut egui::Ui, rows: usize) {
+    let colors = crate::theme::palette(ui.ctx());
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.;
+        for _ in 0..rows {
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::hover());
+            let image = Rect::from_min_size(rect.min + Vec2::splat(8.), Vec2::splat(ROW_ART));
+            ui.painter().rect_filled(image, 3., colors.surface);
+            for (y, width) in [(15., 0.48), (38., 0.30)] {
+                ui.painter().rect_filled(
+                    Rect::from_min_size(
+                        pos2(image.right() + 14., rect.top() + y),
+                        Vec2::new((rect.width() - 92.).max(1.) * width, 10.),
+                    ),
+                    3.,
+                    colors.surface,
+                );
+            }
+        }
+    });
+}
+
+pub fn skeleton_shelf(ui: &mut egui::Ui) {
+    let colors = crate::theme::palette(ui.ctx());
+    let count = columns(ui.available_width(), CARD_ART, CARD_GAP);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = CARD_GAP;
+        for _ in 0..count {
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::new(CARD_ART, CARD_HEIGHT), Sense::hover());
+            ui.painter().rect_filled(
+                Rect::from_min_size(rect.min, Vec2::splat(CARD_ART)),
+                3.,
+                colors.surface,
+            );
+            for (y, width) in [(193., CARD_ART * 0.88), (215., CARD_ART * 0.64)] {
+                ui.painter().rect_filled(
+                    Rect::from_min_size(rect.min + Vec2::new(0., y), Vec2::new(width, 10.)),
+                    3.,
+                    colors.surface,
+                );
+            }
+        }
+    });
 }
 fn label(ui: &egui::Ui, rect: Rect, text: &str, size: f32, color: Color32, lines: usize) {
     let mut job = egui::text::LayoutJob::simple(

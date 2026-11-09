@@ -520,7 +520,7 @@ impl Taskbar {
     }
 
     pub fn smoke_show(&self) {
-        if smoke_active()
+        if (smoke_active() || crate::account::smoke_active())
             && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.hwnd) }
                 .as_bool()
         {

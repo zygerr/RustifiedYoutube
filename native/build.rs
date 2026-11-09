@@ -3,7 +3,7 @@ fn main() {
         let mut resource = winresource::WindowsResource::new();
         resource.set_icon_with_id("../assets/icon.ico", "101");
         resource.set("ProductName", "RustifiedYoutube");
-        resource.set("FileDescription", "RustifiedYoutube native desktop client");
+        resource.set("FileDescription", "RustifiedYoutube");
         resource.compile().expect("compile Windows resources");
     }
 }

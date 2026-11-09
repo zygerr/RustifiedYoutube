@@ -14,6 +14,9 @@ pub enum Request {
     History,
     Discover,
     Connect { force_login: bool },
+    BeginGoogleSignOut,
+    FinishGoogleSignOut,
+    CancelGoogleSignOut(String),
     Captured(crate::account::Capture),
     Disconnect,
     Like(String, bool),
@@ -26,6 +29,8 @@ pub enum Response {
     AccountStatus(String),
     OpenSignIn,
     ConnectFinished,
+    StartGoogleSignOut,
+    GoogleSignOutFinished(bool),
     Tracks(u64, Result<Vec<Track>, String>),
     Library(Result<Vec<Playlist>, String>),
     History(Result<Vec<Track>, String>),
@@ -106,6 +111,28 @@ impl Backend {
                                 else if matches!(result,Ok(true)) {send(&updates,&ctx,Response::Ready(true));}
                                 else {send(&updates,&ctx,Response::OpenSignIn);}
                                 send(&updates,&ctx,Response::ConnectFinished);
+                            }
+                            Request::BeginGoogleSignOut => {
+                                match account.begin_google_sign_out().await {
+                                    Ok(()) => send(&updates, &ctx, Response::StartGoogleSignOut),
+                                    Err(_) => {
+                                        send(&updates, &ctx, Response::AccountStatus("Google sign-out could not start. Your account is unchanged.".into()));
+                                        send(&updates, &ctx, Response::GoogleSignOutFinished(false));
+                                    }
+                                }
+                            }
+                            Request::FinishGoogleSignOut => {
+                                match account.finish_google_sign_out().await {
+                                    Ok(()) => send(&updates, &ctx, Response::GoogleSignOutFinished(true)),
+                                    Err(_) => {
+                                        account.cancel_google_sign_out("Google signed out in the browser, but the saved native session could not be cleared.").await;
+                                        send(&updates, &ctx, Response::GoogleSignOutFinished(false));
+                                    }
+                                }
+                            }
+                            Request::CancelGoogleSignOut(message) => {
+                                account.cancel_google_sign_out(&message).await;
+                                send(&updates, &ctx, Response::GoogleSignOutFinished(false));
                             }
                             Request::Captured(capture)=>account.captured(capture).await,
                             Request::Disconnect => {

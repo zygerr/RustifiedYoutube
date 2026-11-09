@@ -5,7 +5,7 @@
   if (Number.isFinite(window.__rustifiedInitialVolume)) session.volume=Math.max(0,Math.min(1,window.__rustifiedInitialVolume));
   const documentId = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
   const send = data => window.ipc.postMessage(JSON.stringify({...data, document_id:documentId}));
-  let lastIdentity='';
+  let lastIdentity='', confirmedIdentity={signed_in:null,auth_user:null}, signedOutSince=null;
   const api = () => document.querySelector('ytmusic-player')?.playerApi || document.querySelector('ytmusic-player-bar')?.playerApi || document.getElementById('movie_player');
   const video = () => api()?.getVideoElement?.() || api()?.querySelector?.('video') || document.querySelector('#movie_player video') || document.querySelector('ytmusic-player video') || document.querySelector('video');
   const position = () => Number(api()?.getCurrentTime?.() ?? video()?.currentTime ?? 0);
@@ -39,8 +39,13 @@
   for (const event of ['volumechange','loadstart','loadedmetadata','canplay','play','playing']) {
     document.addEventListener(event,event => { capVolume(event.target); applyVolume(); },true);
   }
-  if (typeof MutationObserver !== 'undefined') new MutationObserver(() => {
-    document.querySelectorAll('audio,video').forEach(capVolume);
+  document.querySelectorAll('audio,video').forEach(capVolume);
+  const capAddedMedia = node => {
+    if (typeof HTMLMediaElement !== 'undefined' && node instanceof HTMLMediaElement) capVolume(node);
+    node.querySelectorAll?.('audio,video').forEach(capVolume);
+  };
+  if (typeof MutationObserver !== 'undefined') new MutationObserver(records => {
+    for (const record of records) record.addedNodes.forEach(capAddedMedia);
   }).observe(document,{subtree:true,childList:true});
   const trace = (phase,target=null) => { if (session.diagnostic) send({type:'trace',phase,position:video()?.currentTime || 0,target,video:session.video,ready:video()?.readyState || 0,seeking:!!video()?.seeking,api_state:api()?.getPlayerState?.() ?? -1}); };
   const seek = (seconds,revision=0) => {
@@ -172,7 +177,9 @@
     const media = video();
     const player = api();
     applyVolume();
-    if (!session.ready && document.querySelector('ytmusic-player-bar') && document.readyState === 'complete') {
+    // A slow image/advertising resource mustn't hold authentication and player
+    // initialization hostage until the entire page's load event completes.
+    if (!session.ready && document.querySelector('ytmusic-player-bar') && document.readyState !== 'loading') {
       session.ready = true;
       send({ type: 'ready' });
     }
@@ -180,7 +187,19 @@
       const signed=window.ytcfg?.get?.('LOGGED_IN');
       const rawIndex=window.ytcfg?.get?.('SESSION_INDEX');
       const index=rawIndex===undefined || rawIndex===null ? NaN : Number(rawIndex);
-      const identity={signed_in:typeof signed==='boolean'?signed:null,auth_user:signed===true && Number.isInteger(index) && index>=0 && index<=255?index:null};
+      const selectedIndex=Number.isInteger(index) && index>=0 && index<=255?index:null;
+      if (signed===true) {
+        signedOutSince=null;
+        confirmedIdentity={signed_in:true,auth_user:selectedIndex ?? (confirmedIdentity.signed_in===true?confirmedIdentity.auth_user:null)};
+      } else if (signed===false) {
+        // Bootstrap and account refresh can expose a transient false value.
+        // Only an explicit, continuous signed-out state confirms logout.
+        signedOutSince ??= performance.now();
+        if (performance.now()-signedOutSince>=2000) confirmedIdentity={signed_in:false,auth_user:null};
+      } else {
+        signedOutSince=null;
+      }
+      const identity=confirmedIdentity;
       const encoded=JSON.stringify(identity);
       if(encoded!==lastIdentity) {lastIdentity=encoded;send({type:'session',...identity});}
     }

@@ -1,7 +1,7 @@
 use crate::backend::Response;
 use anyhow::{Context, Result};
 use rustified_core::{
-    api::{Catalog, SessionExpired, is_auth_error, is_expired_error},
+    api::{AuthRejected, Catalog, SessionExpired, is_auth_error, is_expired_error},
     session::{self, SavedSession},
 };
 use std::{
@@ -14,17 +14,30 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{Mutex, RwLock, watch};
+
+// Only confirmed expiry needs a sign-in panel. Request rejection or network
+// failure is recoverable and must not reopen Google on an otherwise valid login.
+fn connection_needs_login(result: Result<bool>) -> Result<bool> {
+    match result {
+        Ok(signed_in) => Ok(!signed_in),
+        Err(error) if is_expired_error(&error) => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn smoke_active() -> bool {
     std::env::args().any(|arg| {
         matches!(
             arg.as_str(),
-            "--smoke-account" | "--smoke-player-session" | "--smoke-login"
+            "--smoke-account" | "--smoke-player-session" | "--smoke-login" | "--smoke-sign-out"
         )
     })
 }
 
 struct State {
     enabled: bool,
+    signing_out: bool,
+    enabled_before_sign_out: Option<bool>,
     saved: Option<SavedSession>,
     client: Option<Arc<Catalog>>,
     revision: u64,
@@ -53,6 +66,8 @@ impl Account {
         let account = Self {
             state: RwLock::new(State {
                 enabled,
+                signing_out: false,
+                enabled_before_sign_out: None,
                 saved,
                 client: None,
                 revision: 0,
@@ -94,11 +109,17 @@ impl Account {
     }
     async fn store(&self, mut saved: SavedSession) -> Result<()> {
         let mut state = self.state.write().await;
-        if !state.enabled {
+        if !state.enabled || state.signing_out {
             return Ok(());
         }
         if saved.auth_user.is_none() {
             saved.auth_user = state.saved.as_ref().and_then(|saved| saved.auth_user);
+        }
+        if saved.user_agent.is_none() {
+            saved.user_agent = state
+                .saved
+                .as_ref()
+                .and_then(|saved| saved.user_agent.clone());
         }
         if state.saved.as_ref() != Some(&saved) {
             session::save_session(&saved)?;
@@ -172,10 +193,13 @@ impl Account {
                     self.connected(true);
                     self.status("Google account connected · browser session synchronized");
                 }
-                Err(error) if is_auth_error(&error) => {
+                Err(error) if is_expired_error(&error) => {
                     self.connected(false);
                     self.status("Google requires sign-in. Choose Continue with Google.");
                 }
+                Err(error) if is_auth_error(&error) => self.status(
+                    "Google account kept · YouTube didn't authorize this request. Try again.",
+                ),
                 Err(_) => {
                     self.status("Google session saved · waiting for the connection to return")
                 }
@@ -203,7 +227,10 @@ impl Account {
         }
         let epoch = self.control_epoch.load(Ordering::SeqCst);
         self.status("Refreshing the Google session automatically…");
-        let saved = self.capture().await?.ok_or(SessionExpired)?;
+        // An empty cookie snapshot can occur while the WebView is navigating
+        // or its cookie store is initializing. It cannot establish that Google
+        // signed out; only an authenticated bootstrap may report expiry.
+        let saved = self.capture().await?.ok_or(AuthRejected)?;
         if self.control_epoch.load(Ordering::SeqCst) != epoch {
             return Err(SessionExpired.into());
         }
@@ -229,6 +256,10 @@ impl Account {
         Fut: Future<Output = Result<T>>,
     {
         let epoch = self.control_epoch.load(Ordering::SeqCst);
+        anyhow::ensure!(
+            !self.state.read().await.signing_out,
+            "Google sign-out is in progress"
+        );
         let mut revision = self.state.read().await.revision;
         let first = match self.client().await {
             Ok((version, client)) => {
@@ -281,9 +312,14 @@ impl Account {
     }
     pub async fn connect(&self, force_login: bool) -> Result<bool> {
         let _refresh = self.refresh.lock().await;
+        anyhow::ensure!(
+            !self.state.read().await.signing_out,
+            "Google sign-out is in progress"
+        );
         session::enable_native()?;
         let epoch = {
             let mut state = self.state.write().await;
+            anyhow::ensure!(!state.signing_out, "Google sign-out is in progress");
             if !state.enabled {
                 state.enabled = true;
                 self.control_epoch.fetch_add(1, Ordering::SeqCst) + 1
@@ -301,16 +337,19 @@ impl Account {
             self.control_epoch.load(Ordering::SeqCst) == epoch,
             "Account connection changed"
         );
-        let mut needs_login = force_login || captured.is_none();
+        let mut has_session = self.state.read().await.saved.is_some();
         if let Some(saved) = captured {
             self.store(saved).await?;
-            self.state.write().await.client = None;
-            match self.client().await {
-                Ok((_, client)) => needs_login = !client.signed_in(),
-                Err(error) if is_auth_error(&error) => needs_login = true,
-                Err(error) => return Err(error),
-            }
+            has_session = true;
         }
+        let needs_login = if force_login || !has_session {
+            true
+        } else {
+            // A temporarily empty browser snapshot must not force another
+            // login. Verify the preserved session before deciding it expired.
+            self.state.write().await.client = None;
+            connection_needs_login(self.client().await.map(|(_, client)| client.signed_in()))?
+        };
         if needs_login {
             self.status("Complete Google sign-in in the account panel.");
             return Ok(false);
@@ -324,8 +363,10 @@ impl Account {
         Ok(true)
     }
     pub async fn disconnect(&self) -> Result<()> {
+        let _refresh = self.refresh.lock().await;
         self.control_epoch.fetch_add(1, Ordering::SeqCst);
         let mut state = self.state.write().await;
+        anyhow::ensure!(!state.signing_out, "Google sign-out is in progress");
         let result = session::disconnect();
         state.enabled = false;
         state.saved = None;
@@ -336,11 +377,71 @@ impl Account {
         self.status("Native library disconnected · the browser account is kept");
         result
     }
+
+    pub async fn begin_google_sign_out(&self) -> Result<()> {
+        let _refresh = self.refresh.lock().await;
+        let mut state = self.state.write().await;
+        anyhow::ensure!(!state.signing_out, "Google sign-out is already in progress");
+        self.control_epoch.fetch_add(1, Ordering::SeqCst);
+        state.enabled_before_sign_out = Some(state.enabled);
+        state.enabled = false;
+        state.signing_out = true;
+        state.client = None;
+        state.revision += 1;
+        drop(state);
+        self.status("Signing out of Google in this app…");
+        Ok(())
+    }
+
+    pub async fn finish_google_sign_out(&self) -> Result<()> {
+        let _refresh = self.refresh.lock().await;
+        let mut state = self.state.write().await;
+        anyhow::ensure!(state.signing_out, "Google sign-out is not in progress");
+        session::disconnect()?;
+        state.enabled = false;
+        state.signing_out = false;
+        state.enabled_before_sign_out = None;
+        state.saved = None;
+        state.client = None;
+        state.revision += 1;
+        drop(state);
+        self.connected(false);
+        self.status("Google signed out of this app");
+        Ok(())
+    }
+
+    pub async fn cancel_google_sign_out(&self, message: &str) {
+        let _refresh = self.refresh.lock().await;
+        let mut state = self.state.write().await;
+        if state.signing_out {
+            let was_enabled = state.enabled_before_sign_out.take().unwrap_or(false);
+            state.enabled = was_enabled && session::native_enabled();
+            state.signing_out = false;
+            state.client = None;
+            state.revision += 1;
+            self.control_epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        drop(state);
+        self.status(message);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reconnect_opens_sign_in_only_for_confirmed_expiry_or_guest() {
+        assert!(!connection_needs_login(Ok(true)).unwrap());
+        assert!(connection_needs_login(Ok(false)).unwrap());
+        assert!(connection_needs_login(Err(SessionExpired.into())).unwrap());
+        for error in [
+            anyhow::Error::from(AuthRejected),
+            anyhow::anyhow!("Network timeout"),
+        ] {
+            assert!(connection_needs_login(Err(error)).is_err());
+        }
+    }
+
     fn fixture(enabled: bool) -> (Arc<Account>, mpsc::Receiver<Response>) {
         let (responses, receiver) = mpsc::channel();
         let (captures, _) = watch::channel(None);
@@ -353,6 +454,8 @@ mod tests {
             Arc::new(Account {
                 state: RwLock::new(State {
                     enabled,
+                    signing_out: false,
+                    enabled_before_sign_out: None,
                     saved: Some(saved),
                     client: None,
                     revision: 0,
@@ -446,6 +549,64 @@ mod tests {
             account.state.read().await.saved.as_ref().unwrap().cookies,
             "SAPISID=fixture;"
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_refresh_snapshot_does_not_report_a_saved_account_signed_out() {
+        let (account, responses) = fixture(true);
+        let worker = account.clone();
+        let task = tokio::spawn(async move { worker.recover(0).await });
+        let id = requested(&responses).await;
+        account
+            .captured(Capture {
+                id,
+                result: Ok(None),
+            })
+            .await;
+        let error = task.await.unwrap().unwrap_err();
+        assert!(is_auth_error(&error));
+        assert!(!is_expired_error(&error));
+        assert!(account.reported.load(Ordering::SeqCst));
+        assert_eq!(
+            account.state.read().await.saved.as_ref().unwrap().cookies,
+            "SAPISID=fixture;"
+        );
+        assert!(
+            !responses
+                .try_iter()
+                .any(|response| matches!(response, Response::Ready(false)))
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_out_freezes_captures_until_confirmed_or_cancelled() {
+        let (account, responses) = fixture(true);
+        account.begin_google_sign_out().await.unwrap();
+        account
+            .captured(Capture {
+                id: 0,
+                result: Ok(Some(SavedSession {
+                    cookies: "SAPISID=stale;".into(),
+                    user_agent: None,
+                    auth_user: None,
+                })),
+            })
+            .await;
+        {
+            let state = account.state.read().await;
+            assert!(!state.enabled);
+            assert!(state.signing_out);
+            assert_eq!(state.saved.as_ref().unwrap().cookies, "SAPISID=fixture;");
+        }
+        assert!(responses.try_recv().is_ok());
+
+        account
+            .cancel_google_sign_out("Google sign-out could not be confirmed")
+            .await;
+        let state = account.state.read().await;
+        assert!(state.enabled);
+        assert!(!state.signing_out);
+        assert_eq!(state.saved.as_ref().unwrap().cookies, "SAPISID=fixture;");
     }
 }
 

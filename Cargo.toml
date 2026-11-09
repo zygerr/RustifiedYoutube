@@ -4,7 +4,7 @@ default-members = ["native"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.13"
+version = "0.3.15"
 edition = "2024"
 rust-version = "1.90"
 publish = false
@@ -13,3 +13,9 @@ publish = false
 codegen-units = 1
 lto = "thin"
 strip = true
+
+# Keep local checks and previews from accumulating multi-gigabyte PDBs and
+# incremental snapshots. Optimized shipped builds keep the release profile.
+[profile.dev]
+debug = 0
+incremental = false

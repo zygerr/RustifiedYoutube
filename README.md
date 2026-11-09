@@ -19,6 +19,7 @@ An unofficial Windows x64 YouTube Music client. The interface, search, library, 
 - Connect a Google account to access playlists, liked songs, and like/unlike actions.
 - Find account listening history and locally remembered plays in **Discover → Listen again**. Click a card to play; Refresh reloads account history.
 - Seek on the full-width bottom rail or the rail below the expanded media panel. Click or drag to seek; focus the rail and use Left/Right to move five seconds.
+- Press **Ctrl+K** to focus search. The compact persistent player keeps transport, artwork and volume controls aligned, with consistent loading placeholders for catalog pages.
 - Show **RustifiedYoutube** and the application icon for the player’s audio sessions in the Windows volume mixer. Labels follow this client’s dedicated WebView2 browser and active output devices; volume, mute, and routing remain under your control. Reopen a mixer panel if Windows has cached its previous label.
 - Hover the app icon in the Windows taskbar for native **Previous**, **Play/Pause**, and **Next** controls. They stay synchronized with playback, work while minimized, and show the current song and artist in the thumbnail tooltip. At the end of the queue, Next is disabled unless Repeat is on.
 - Play, pause, change volume, use previous/next, repeat the queue, and keep playing in the tray. **Shuffle** randomizes upcoming tracks while preserving the current song and played entries; switching it off restores the remaining original order. The choice is saved across launches.
@@ -37,6 +38,8 @@ cargo run -p rustified-youtube-native --locked
 Choose **Continue with Google** to connect. Google sign-in is displayed inside the very same WebView used for playback, backed by the app's persistent profile. Complete any Google challenges yourself. **Settings → Account** shows the playback login separately from the native library connection. **Refresh connection** synchronizes a working profile without interrupting playback; **Open Google sign-in** opens the in-app login flow. Returning from Google restores the selected track, position, pause state, volume, and Audio/Video mode.
 
 The native library session is synchronized from the browser at startup and every five minutes. Rejected authenticated requests trigger a coordinated refresh and one retry. Temporary connection or server errors keep the saved account, and public search remains available if Google requires a new sign-in. Google can still expire or revoke a login; the client cannot prevent that.
+
+Temporary unavailable page configuration, a restricted track, and an incomplete cookie refresh do not count as sign-out. Cookie callbacks must still match the playback document and selected account before they can update the saved session. Secure authentication-cookie rotation is accepted during native library refreshes.
 
 A saved library credential does not prove that playback is authenticated. When an account is saved, playback waits for the media page to confirm sign-in; a signed-out player offers reconnection instead of silently starting as a guest. Use the Google account with the Premium subscription for its playback benefits.
 
@@ -83,6 +86,7 @@ cargo run -p rustified-core --example smoke -- --authenticated
 ./target/debug/RustifiedYoutube.exe --smoke-account
 ./target/debug/RustifiedYoutube.exe --smoke-player-session
 ./target/debug/RustifiedYoutube.exe --smoke-login
+./target/debug/RustifiedYoutube.exe --smoke-sign-out
 ./target/debug/RustifiedYoutube.exe --smoke-stream --smoke-recovery --smoke-login-rebind
 ./target/debug/RustifiedYoutube.exe --smoke-artwork
 ```
@@ -103,6 +107,8 @@ UI snapshots accept `--theme purple` or `--theme oled` alongside `--ui-snapshot 
 
 The login check opens the official Google sign-in flow inside the playback WebView and verifies the return to an authenticated player and library. It may require you to complete Google sign-in. The combined recovery/rebind check deliberately ignores the first SPA selection, verifies automatic direct-watch recovery, then verifies paused-position restoration through Google sign-in and queue advancement. Both use no saved UI preferences or Discord presence; the streaming check stays muted.
 
+The sign-out check requires the app's WebView profile to be signed in and intentionally signs that Google profile out. It verifies the returned playback page is signed out and the encrypted native session is cleared. It does not clear unrelated WebView site preferences. Use **Disconnect native session** when you want to disable library access but keep Google signed in.
+
 The artwork check fetches public album/video images, verifies that the expanded images retain more resolution than browsing images, and prints dimensions only. Unit tests cover high-resolution source selection, URL fallbacks, bounded decoding, and artwork wheel behavior alongside the volume slider.
 
 Debug builds also support offline visual snapshots:
@@ -116,6 +122,8 @@ Supported pages are `discover`, `library`, `search`, `queue`, `player`, and `set
 
 ## Releases
 
+Local development builds disable full debug symbols and incremental snapshots to reduce disk use. Cargo output under `target/debug` and `target/release` is rebuildable; packaged releases live under `dist/<version>` and `target/package/<version>`. Account data lives outside the project folder and must not be included in build cleanup.
+
 Run the Windows installer to update the installed application and its shortcuts. Launching a portable build from the project folder does not replace an older installation. The installer upgrades the legacy `%LOCALAPPDATA%\RustifiedYoutube` installation in place when present and preserves its old executable filename as a native compatibility entry point. Account data and startup preferences are preserved.
 
 The [Windows workflow](https://github.com/zygerr/RustifiedYoutube/actions/workflows/windows.yml) checks and builds pushes to `main` and pull requests. Change the workspace version in `Cargo.toml`, update `Cargo.lock`, and push a matching tag to create a **draft** [GitHub Release](https://github.com/zygerr/RustifiedYoutube/releases) with installer, portable ZIP, and checksums. Private releases require repository access.
@@ -125,5 +133,7 @@ The [Windows workflow](https://github.com/zygerr/RustifiedYoutube/actions/workfl
 The dedicated Google/WebView2 profile remains at `%LOCALAPPDATA%\io.github.zygerr.rustifiedyoutube\webview`. The metadata API session is stored alongside it as `session.dpapi`, encrypted with Windows DPAPI for the current Windows user and updated atomically. Version 0.3.6 also preserves the selected Google account index for the player and metadata API. Version 0.3.4 saves the profile's browser User-Agent and reads the previous session format automatically. The application never copies another browser's profile. Session cookies are read through native WebView2 APIs, including HttpOnly cookies, and never pass through JavaScript IPC, logs, or Discord. Do not share these files.
 
 **Disconnect native session** removes the encrypted metadata API session and writes `session.disabled` to stop automatic native reconnection. It does not sign out the separate Google/WebView2 profile. **Continue with Google** enables reconnection and can restore that account. Uninstalling preserves user data. UI preferences are stored in eframe's per-user application directory. Old `audio-buffer` files from earlier versions are not used by version 0.3.
+
+**Sign out of Google in this app** uses Google's logout flow in the dedicated WebView2 profile, confirms the playback page is signed out, then removes the encrypted native session and disables native reconnection. Other WebView site preferences remain intact.
 
 The streaming architecture was researched against [ytmdesktop's integration with the official player](https://github.com/ytmdesktop/ytmdesktop/blob/development/src/renderer/ytmview/preload.ts). The in-app login follows the persistent browser-session pattern in [YTMDesktop's YTMViewManager](https://github.com/ytmdesktop/ytmdesktop/blob/d489670733dbd4af83420e802a069f64481aebc5/src/main/services/ytmviewmanager/index.ts). RustifiedYoutube has its own Rust interface and media adapter. This project is independent and is not affiliated with Google or YouTube.

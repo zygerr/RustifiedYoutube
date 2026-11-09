@@ -43,7 +43,10 @@ fn api_error(error: ytmapi_rs::Error) -> anyhow::Error {
         ytmapi_rs::error::ErrorKind::OtherErrorCodeInResponse {
             code: 401 | 403, ..
         } => AuthRejected.into(),
-        ytmapi_rs::error::ErrorKind::Header => SessionExpired.into(),
+        // A malformed/unsupported request header does not prove that the
+        // browser itself signed out. Refresh the API client without dropping
+        // the saved account or forcing the playback engine into guest mode.
+        ytmapi_rs::error::ErrorKind::Header => AuthRejected.into(),
         other => ytmapi_rs::Error::from(other).into(),
     }
 }
@@ -136,11 +139,8 @@ impl Catalog {
             .build()?;
         let signed = match cookie {
             Some(cookie) => {
-                let sapisid = cookie
-                    .split(';')
-                    .find_map(|part| part.trim().strip_prefix("SAPISID="))
-                    .filter(|value| !value.is_empty())
-                    .ok_or(SessionExpired)?;
+                let sapisid =
+                    crate::session::authentication_cookie(cookie).ok_or(SessionExpired)?;
                 let token: BrowserToken = serde_json::from_value(
                     serde_json::json!({"sapisid": sapisid, "client_version": client_version, "cookies": cookie}),
                 )?;
@@ -575,6 +575,10 @@ mod bootstrap_tests {
     }
     #[test]
     fn auth_rejections_refresh_but_do_not_prove_google_signed_out() {
+        let header_error =
+            super::api_error(ytmapi_rs::Error::from(ytmapi_rs::error::ErrorKind::Header));
+        assert!(super::is_auth_error(&header_error));
+        assert!(!super::is_expired_error(&header_error));
         for code in [401, 403] {
             let error =
                 ytmapi_rs::Error::from(ytmapi_rs::error::ErrorKind::OtherErrorCodeInResponse {

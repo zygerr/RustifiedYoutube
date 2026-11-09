@@ -51,17 +51,17 @@ impl Theme {
         match self {
             Self::Classic => Palette {
                 background: rgb(3, 3, 3),
-                panel: rgb(18, 18, 18),
+                panel: rgb(12, 12, 12),
                 surface: rgb(35, 35, 35),
                 hover: rgb(45, 45, 45),
-                selected: rgb(32, 32, 32),
+                selected: rgb(38, 38, 38),
                 border: rgb(35, 35, 35),
                 text: rgb(241, 241, 241),
                 muted: rgb(170, 170, 170),
                 accent: rgb(241, 241, 241),
                 progress: rgb(255, 0, 51),
                 on_accent: rgb(3, 3, 3),
-                rail: rgb(56, 61, 72),
+                rail: rgb(63, 63, 63),
                 error: rgb(55, 20, 24),
             },
             Self::PurpleHaze => Palette {

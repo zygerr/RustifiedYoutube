@@ -67,12 +67,22 @@ pub struct SavedSession {
 }
 impl SavedSession {
     pub fn valid(&self) -> bool {
-        self.cookies.split(';').any(|part| {
-            part.trim()
-                .strip_prefix("SAPISID=")
-                .is_some_and(|value| !value.is_empty())
-        })
+        authentication_cookie(&self.cookies).is_some()
     }
+}
+
+/// YouTube can rotate away SAPISID while keeping its secure third-party
+/// equivalent. Use the same credential for validation and request signing so
+/// a valid browser session is not discarded merely because its cookie changed.
+pub fn authentication_cookie(cookies: &str) -> Option<&str> {
+    ["SAPISID", "__Secure-3PAPISID"]
+        .into_iter()
+        .find_map(|name| {
+            cookies.split(';').find_map(|part| {
+                let (key, value) = part.trim().split_once('=')?;
+                (key == name && !value.is_empty()).then_some(value)
+            })
+        })
 }
 pub fn save_session(session: &SavedSession) -> Result<()> {
     anyhow::ensure!(session.valid(), "Sign-in has not completed yet");
@@ -203,6 +213,27 @@ mod tests {
                 .auth_user,
             Some(2)
         );
+    }
+    #[test]
+    fn rotating_to_the_secure_authentication_cookie_keeps_the_session_usable() {
+        let secure = "__Secure-3PAPISID=rotated; LOGIN_INFO=fixture;";
+        assert!(super::decode_session(secure).unwrap().valid());
+        assert_eq!(super::authentication_cookie(secure), Some("rotated"));
+        assert_eq!(
+            super::authentication_cookie("SAPISID=; __Secure-3PAPISID=rotated;"),
+            Some("rotated")
+        );
+        assert_eq!(
+            super::authentication_cookie("__Secure-3PAPISID=rotated; SAPISID=primary;"),
+            Some("primary")
+        );
+        for cookies in [
+            "NOT_SAPISID=wrong;",
+            "NOT___Secure-3PAPISID=wrong;",
+            "__Secure-3PAPISID=;",
+        ] {
+            assert!(super::authentication_cookie(cookies).is_none());
+        }
     }
     #[test]
     fn encrypted_session_roundtrips_without_writing_user_profile() {

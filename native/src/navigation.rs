@@ -44,6 +44,13 @@ pub fn sign_in_url() -> String {
     url.into()
 }
 
+pub fn sign_out_url() -> String {
+    let mut url = Url::parse("https://accounts.google.com/Logout").expect("fixed URL");
+    url.query_pairs_mut()
+        .append_pair("continue", "https://music.youtube.com/");
+    url.into()
+}
+
 pub fn watch_url(video_id: &str, auth_user: Option<u8>) -> Option<String> {
     if !rustified_core::model::valid_video_id(video_id) {
         return None;
@@ -84,6 +91,21 @@ mod tests {
         ] {
             assert!(destination(url).is_none());
         }
+    }
+    #[test]
+    fn sign_out_uses_google_logout_and_returns_to_music() {
+        let logout = Url::parse(&sign_out_url()).unwrap();
+        assert!(destination(logout.as_str()) == Some(Destination::Account));
+        assert_eq!(logout.host_str(), Some("accounts.google.com"));
+        assert_eq!(logout.path(), "/Logout");
+        assert_eq!(
+            logout
+                .query_pairs()
+                .find(|(key, _)| key == "continue")
+                .unwrap()
+                .1,
+            "https://music.youtube.com/"
+        );
     }
     #[test]
     fn recovery_urls_keep_only_the_requested_track_and_selected_account() {

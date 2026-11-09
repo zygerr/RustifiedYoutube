@@ -16,6 +16,8 @@ pub enum Icon {
     Repeat,
     Shuffle,
     Search,
+    Close,
+    Account,
 }
 
 pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color32) {
@@ -24,6 +26,25 @@ pub fn draw(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color3
     let stroke = Stroke::new(1.7_f32, color);
     let line = |a, b| painter.line_segment([a, b], stroke);
     match icon {
+        Icon::Account => {
+            painter.circle_stroke(center, 10., stroke);
+            painter.circle_stroke(point(0., -3.), 3., stroke);
+            ui_line(
+                painter,
+                &[
+                    point(-5., 6.),
+                    point(-4., 3.),
+                    point(0., 2.),
+                    point(4., 3.),
+                    point(5., 6.),
+                ],
+                stroke,
+            );
+        }
+        Icon::Close => {
+            line(point(-5., -5.), point(5., 5.));
+            line(point(-5., 5.), point(5., -5.));
+        }
         Icon::Search => {
             painter.circle_stroke(point(-2., -2.), 6., stroke);
             line(point(3., 3.), point(8., 8.));

@@ -38,6 +38,12 @@ pub struct PlayerState {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BridgeEvent {
     #[serde(skip_deserializing)]
+    Captured {
+        capture: crate::account::Capture,
+        document_id: Option<String>,
+        identity: crate::playback_session::Identity,
+    },
+    #[serde(skip_deserializing)]
     Navigation {
         destination: crate::navigation::Destination,
     },
@@ -117,6 +123,7 @@ pub struct Player {
     mixer: Option<crate::mixer::Mixer>,
     _context: Option<WebContext>,
     incoming: Receiver<BridgeEvent>,
+    events: Sender<BridgeEvent>,
     updates: Sender<PlayerState>,
     pub rx: Receiver<PlayerState>,
     ready: Cell<bool>,
@@ -140,6 +147,8 @@ pub struct Player {
     waiting_restore: Cell<bool>,
     login_open: Cell<bool>,
     login_completed: Cell<bool>,
+    google_sign_out_pending: Cell<Option<Instant>>,
+    google_sign_out_result: RefCell<Option<Result<(), String>>>,
     suppress_login: Cell<bool>,
     recovered: Cell<bool>,
     prefer_direct: Cell<bool>,
@@ -155,6 +164,7 @@ impl Player {
             mixer: None,
             _context: None,
             incoming,
+            events: events.clone(),
             updates,
             rx,
             ready: Cell::new(false),
@@ -184,6 +194,8 @@ impl Player {
             waiting_restore: Cell::new(false),
             login_open: Cell::new(false),
             login_completed: Cell::new(false),
+            google_sign_out_pending: Cell::new(None),
+            google_sign_out_result: RefCell::new(None),
             suppress_login: Cell::new(false),
             recovered: Cell::new(false),
             prefer_direct: Cell::new(false),
@@ -192,8 +204,14 @@ impl Player {
         if crate::preview::active() {
             return result;
         }
+        if crate::account::smoke_active() {
+            println!("Playback profile initialization started");
+        }
         let build = (|| -> Result<_, Box<dyn std::error::Error>> {
             let mut context = WebContext::new(Some(rustified_core::session::profile_dir()?));
+            if crate::account::smoke_active() {
+                println!("Persistent WebView context initialized");
+            }
             let repaint = cc.egui_ctx.clone();
             let nav_repaint = repaint.clone();
             let popup_repaint = repaint.clone();
@@ -249,6 +267,9 @@ impl Player {
                         .and_then(|saved| saved.auth_user),
                 ))
                 .build_as_child(cc)?;
+            if crate::account::smoke_active() {
+                println!("Playback WebView created");
+            }
             Ok((webview, context))
         })();
         match build {
@@ -257,6 +278,9 @@ impl Player {
                 result.mixer = crate::mixer::Mixer::start();
                 result.sync_audio_identity();
                 result._context = Some(context);
+                if crate::account::smoke_active() {
+                    println!("Playback startup completed");
+                }
             }
             Err(_) => {
                 let _ = result.updates.send(PlayerState { error:Some("The YouTube playback engine could not start. Install Microsoft WebView2 Runtime and restart RustifiedYoutube.".into()),..Default::default() });
@@ -289,18 +313,34 @@ impl Player {
     pub fn pump(&self) {
         while let Ok(event) = self.incoming.try_recv() {
             match event {
+                BridgeEvent::Captured {
+                    mut capture,
+                    document_id,
+                    identity,
+                } => {
+                    if !crate::playback_session::capture_is_current(
+                        document_id.as_deref(),
+                        self.document.borrow().as_deref(),
+                        identity,
+                        self.identity.get(),
+                    ) {
+                        // Resolve foreground requests without allowing an old
+                        // document/account to overwrite the current session.
+                        capture.result = Err(());
+                    }
+                    let _ = self.session_tx.send(capture);
+                }
                 BridgeEvent::Navigation { destination } => {
                     self.suspend();
                     if destination == crate::navigation::Destination::Account {
-                        self.identity.set(crate::playback_session::Identity {
-                            signed_in: Some(false),
-                            auth_user: None,
-                        });
+                        // Google's SSO/consent handoffs also visit account
+                        // hosts. Navigation alone cannot establish sign-out.
                         if !self.suppress_login.get() {
                             self.login_open.set(true);
                         }
                     }
-                    if std::env::args().any(|arg| arg == "--smoke-stream" || arg == "--smoke-login")
+                    if crate::account::smoke_active()
+                        || std::env::args().any(|arg| arg == "--smoke-stream")
                     {
                         println!(
                             "Media navigation: {}",
@@ -343,14 +383,20 @@ impl Player {
                         continue;
                     }
                     if status == "LOGIN_REQUIRED" {
-                        self.identity.set(crate::playback_session::Identity {
-                            signed_in: Some(false),
-                            auth_user: None,
-                        });
-                        self.eval(&json!({"op":"pause"}));
-                        self.notify_error(
-                            "Google requests sign-in for this track. Choose Continue with Google.",
-                        );
+                        // A track's playability response isn't the account's
+                        // identity (age/region restrictions also use this code).
+                        // Retry the authenticated document once, then report a
+                        // track error while preserving the confirmed account.
+                        if self.allowed() && !self.recovered.replace(true) {
+                            self.reconnect();
+                        } else {
+                            self.eval(&json!({"op":"pause"}));
+                            self.notify_error(if self.needs_login() {
+                                "Google requests sign-in. Choose Continue with Google."
+                            } else {
+                                "YouTube requires additional access for this track. Try another result. Your account is still saved."
+                            });
+                        }
                     } else if self.allowed() && !self.recovered.replace(true) {
                         self.prefer_direct.set(true);
                         if std::env::args().any(|arg| arg == "--smoke-stream") {
@@ -368,10 +414,30 @@ impl Player {
                     if self.document.borrow().as_ref() != Some(&document_id) {
                         continue;
                     }
-                    let previous = self.identity.replace(identity);
+                    let previous = self.identity.get();
+                    let identity = crate::playback_session::observed(previous, identity);
+                    self.identity.set(identity);
+                    if self.google_sign_out_pending.get().is_some() && identity.signed_in.is_some()
+                    {
+                        self.google_sign_out_pending.set(None);
+                        if identity.signed_in == Some(false) {
+                            self.resume.borrow_mut().take();
+                            self.requested.set(None);
+                            self.restoring.set(false);
+                            self.waiting_restore.set(false);
+                            self.login_open.set(false);
+                            self.login_completed.set(false);
+                            self.eval(&json!({"op":"pause"}));
+                            *self.google_sign_out_result.borrow_mut() = Some(Ok(()));
+                        } else {
+                            *self.google_sign_out_result.borrow_mut() =
+                                Some(Err("Google still reports this app as signed in.".into()));
+                        }
+                    }
                     if identity.signed_in == Some(true)
                         && previous != identity
                         && rustified_core::session::native_enabled()
+                        && self.google_sign_out_pending.get().is_none()
                     {
                         self.capture_session(0);
                     }
@@ -543,6 +609,14 @@ impl Player {
                 .is_some_and(|started| started.elapsed() > Duration::from_secs(25))
         {
             self.loading_since.set(None);
+            if crate::account::smoke_active()
+                && let Some(webview) = &self.webview
+            {
+                let _ = webview.evaluate_script_with_callback(
+                    "JSON.stringify({origin:location.origin,ready:document.readyState,bridge:!!window.__rustifiedMedia,playerBar:!!document.querySelector('ytmusic-player-bar'),configuration:!!window.ytcfg,signedIn:window.ytcfg?.get?.('LOGGED_IN')===true})",
+                    |result| println!("Playback bootstrap diagnostic: {result}"),
+                );
+            }
             self.notify_error(
                 "The playback page couldn't finish loading. Try Retry playback or Google sign-in.",
             );
@@ -558,23 +632,35 @@ impl Player {
                 self.capture_session(0);
             }
         }
+        if self
+            .google_sign_out_pending
+            .get()
+            .is_some_and(|started| started.elapsed() > Duration::from_secs(30))
+        {
+            self.google_sign_out_pending.set(None);
+            *self.google_sign_out_result.borrow_mut() = Some(Err(
+                "Google sign-out was not confirmed. Your saved native account was kept.".into(),
+            ));
+        }
     }
     pub fn capture_session(&self, id: u64) {
-        let tx = self.session_tx.clone();
+        let tx = self.events.clone();
+        let document_id = self.document.borrow().clone();
+        let identity = self.identity.get();
         let repaint = self.repaint.clone();
         let result = (|| -> windows::core::Result<()> {
             let webview = self.webview.as_ref().ok_or_else(|| {
                 windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32))
             })?;
             let core = unsafe { webview.controller().CoreWebView2()? };
-            rustified_core::browser_session::capture(
-                &core,
-                self.identity.get().auth_user,
-                move |result| {
-                    let _ = tx.send(crate::account::Capture { id, result });
-                    repaint.request_repaint();
-                },
-            )
+            rustified_core::browser_session::capture(&core, identity.auth_user, move |result| {
+                let _ = tx.send(BridgeEvent::Captured {
+                    capture: crate::account::Capture { id, result },
+                    document_id,
+                    identity,
+                });
+                repaint.request_repaint();
+            })
         })();
         if result.is_err() {
             let _ = self.session_tx.send(crate::account::Capture {
@@ -653,6 +739,35 @@ impl Player {
         self.login_open.set(true);
         if let Some(webview) = &self.webview {
             let _ = webview.load_url(&crate::navigation::sign_in_url());
+        }
+    }
+    pub fn begin_google_sign_out(&self) -> Result<(), String> {
+        let Some(webview) = &self.webview else {
+            return Err("The Google sign-in browser is not available.".into());
+        };
+        if self.google_sign_out_pending.get().is_some() {
+            return Err("Google sign-out is already in progress.".into());
+        }
+        self.eval(&json!({"op":"pause"}));
+        self.suspend();
+        self.login_open.set(false);
+        self.login_completed.set(false);
+        self.suppress_login.set(true);
+        self.google_sign_out_pending.set(Some(Instant::now()));
+        if let Err(error) = webview.load_url(&crate::navigation::sign_out_url()) {
+            self.google_sign_out_pending.set(None);
+            return Err(format!("Could not open Google sign-out: {error}"));
+        }
+        Ok(())
+    }
+    pub fn take_google_sign_out_result(&self) -> Option<Result<(), String>> {
+        self.google_sign_out_result.borrow_mut().take()
+    }
+    pub fn cancel_google_sign_out(&self) {
+        self.google_sign_out_pending.set(None);
+        self.suppress_login.set(false);
+        if !self.ready.get() {
+            self.reconnect();
         }
     }
     pub fn cancel_login(&self) {
@@ -797,6 +912,7 @@ mod tests {
         for event in [
             r#"{"type":"popup","url":"https://accounts.google.com/"}"#,
             r#"{"type":"navigation","destination":"account"}"#,
+            r#"{"type":"captured","capture":{"id":0,"result":null}}"#,
         ] {
             assert!(serde_json::from_str::<super::BridgeEvent>(event).is_err());
         }

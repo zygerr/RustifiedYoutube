@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.15
+
+- Keep confirmed playback identity during temporary missing configuration and require a sustained explicit signed-out signal; Google account handoffs and individual track restrictions no longer declare the entire account signed out.
+- Reject cookie callbacks from an old playback document or account, preserve credentials during incomplete refreshes and API authorization failures, and support secure authentication-cookie rotation.
+- Initialize the media bridge when Music is interactive rather than waiting for every page resource to finish loading.
+- Refine native navigation, search, typography, loading placeholders and fixed card geometry; reduce the persistent player to 96 px with aligned transport, artwork and volume controls.
+- Disable full debug symbols and incremental snapshots in local development builds to reduce build-storage growth.
+
+## 0.3.14
+
+- Add a separate Google sign-out action while keeping native library disconnect independent from browser sign-in.
+- Confirm sign-out in the playback WebView before clearing the encrypted native session, and ignore stale session captures during the transition.
+- Avoid rescanning the entire Music document for media elements on every DOM mutation.
+- Use RustifiedYoutube consistently for the visible wordmark and Windows executable description.
+
 ## 0.3.13
 
 - Upgrade an existing legacy installation in place so Start Menu shortcuts and Windows relaunches open the native Rust interface.

@@ -4,12 +4,17 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 
-function player(initialVolume = .5, identity = {}, autoplay = true) {
+function player(initialVolume = .5, identity = {}, autoplay = true, readyState = 'complete') {
   let now = 10000, interval, id = 'Fixture0001', clock = 10;
   let title='NOVA LANE - Night shift (Official Video)',songButton=null;
+  let mutationObserver,queryAllCalls=0;
   const messages = [];
   const events = new Map(), playedVolumes = [];
   const emit = (event, target) => {for (const listener of events.get(event) || []) listener({target});};
+  class MockMutationObserver {
+    constructor(callback) {mutationObserver=this;this.callback=callback;}
+    observe() {}
+  }
   class MockMedia {
     constructor() {
       Object.assign(this,{readyState:4,seeking:false,paused:false,ended:false,duration:200,currentTime:10,
@@ -18,6 +23,7 @@ function player(initialVolume = .5, identity = {}, autoplay = true) {
     get volume() {return this._volume;}
     set volume(value) {if(this._volume !== value) {this._volume=value; emit('volumechange',this);}}
     addEventListener() {}
+    querySelectorAll() {return [];}
     pause() {this.paused=true;}
     play() {playedVolumes.push(this.volume);emit('play',this);this.paused=false;return Promise.resolve();}
   }
@@ -39,9 +45,9 @@ function player(initialVolume = .5, identity = {}, autoplay = true) {
     playVideo() {media.paused = false;}, pauseVideo() {media.paused = true;}
   };
   const document = {
-    readyState: 'complete', head: {},
+    readyState, head: {},
     addEventListener(event,listener) {if (!events.has(event)) events.set(event,[]);events.get(event).push(listener);},
-    querySelectorAll: () => [media],
+    querySelectorAll() {queryAllCalls++;return [media];},
     querySelector(selector) {
       if (selector === 'ytmusic-player') return {playerApi: api};
       if (selector === 'ytmusic-player-bar') return {};
@@ -55,6 +61,7 @@ function player(initialVolume = .5, identity = {}, autoplay = true) {
     document, location: {origin: 'https://music.youtube.com'},
     window: {ytcfg:{get:key=>identity[key]},__rustifiedInitialVolume:initialVolume,ipc: {postMessage: text => messages.push(JSON.parse(text))}},
     HTMLMediaElement:MockMedia,
+    MutationObserver:MockMutationObserver,
     performance: {now: () => now},
     CustomEvent: class {constructor(type, options) {Object.assign(this, options);}},
     setInterval(callback) {interval = callback;}
@@ -68,6 +75,9 @@ function player(initialVolume = .5, identity = {}, autoplay = true) {
   if(autoplay) command({op: 'play', id, generation: 1}); tick();
   return {
     command, tick, messages, identity, get media() {return media;}, playedVolumes,
+    document,
+    mutate(node) {mutationObserver.callback([{addedNodes:[node]}]);},
+    queryAllCalls() {return queryAllCalls;},
     replaceMedia() {media=new MockMedia();return media;},
     resetYouTubeVolume(value) {apiVolume=value*100;media.volume=value;},
     unstarted() {unstarted=true;},
@@ -104,6 +114,17 @@ test('new media elements are limited before their first play call', () => {
   assert.equal(replacement.volume,1);
   replacement.play();
   assert.deepEqual(p.playedVolumes,[.25]);
+});
+
+test('added media subtrees are capped without rescanning the document', () => {
+  const p=player(.25), scans=p.queryAllCalls(), replacement=p.replaceMedia();
+  p.mutate({querySelectorAll:()=>[replacement]});
+  assert.equal(replacement.volume,.25);
+  assert.equal(p.queryAllCalls(),scans);
+  const direct=p.replaceMedia();
+  p.mutate(direct);
+  assert.equal(direct.volume,.25);
+  assert.equal(p.queryAllCalls(),scans);
 });
 
 test('normalization below the selected level is preserved across polls', () => {
@@ -158,6 +179,8 @@ test('playback identity is reported without a song and unknown is distinct from 
   let session=p.messages.filter(m=>m.type==='session').at(-1);
   assert.equal(session.signed_in,null);assert.equal(session.auth_user,null);
   p.identity.LOGGED_IN=false;p.tick();
+  assert.equal(p.messages.filter(m=>m.type==='session').at(-1).signed_in,null);
+  p.tick(2000);
   session=p.messages.filter(m=>m.type==='session').at(-1);
   assert.equal(session.signed_in,false);
   p.identity.LOGGED_IN=true;p.identity.SESSION_INDEX='2';p.tick();
@@ -171,6 +194,40 @@ test('invalid and missing account selectors are never coerced to account zero', 
     const p=player(.5,{LOGGED_IN:true,SESSION_INDEX:index});
     assert.equal(p.messages.find(m=>m.type==='session').auth_user,null);
   }
+});
+
+test('transient missing identity and account index keep the confirmed same-document login', () => {
+  const p=player(.5,{LOGGED_IN:true,SESSION_INDEX:'2'},false);
+  delete p.identity.LOGGED_IN;delete p.identity.SESSION_INDEX;p.tick();
+  let identity=p.messages.filter(m=>m.type==='session').at(-1);
+  assert.equal(identity.signed_in,true);assert.equal(identity.auth_user,2);
+  p.identity.LOGGED_IN=true;p.tick();
+  identity=p.messages.filter(m=>m.type==='session').at(-1);
+  assert.equal(identity.auth_user,2);
+});
+
+test('temporary false bootstrap state does not revoke login but sustained logout does', () => {
+  const p=player(.5,{LOGGED_IN:true,SESSION_INDEX:'1'},false);
+  p.identity.LOGGED_IN=false;p.tick(200);p.tick(1000);
+  assert.equal(p.messages.filter(m=>m.type==='session').at(-1).signed_in,true);
+  p.identity.LOGGED_IN=true;p.tick();
+  p.identity.LOGGED_IN=false;p.tick();p.tick(2000);
+  const identity=p.messages.filter(m=>m.type==='session').at(-1);
+  assert.equal(identity.signed_in,false);assert.equal(identity.auth_user,null);
+});
+
+test('a restricted track cannot change the page account identity', () => {
+  const p=player(.5,{LOGGED_IN:true,SESSION_INDEX:'2'});
+  p.status('LOGIN_REQUIRED');p.tick(1200);
+  assert.equal(p.messages.filter(m=>m.type==='stalled').at(-1).status,'LOGIN_REQUIRED');
+  const identity=p.messages.filter(m=>m.type==='session').at(-1);
+  assert.equal(identity.signed_in,true);assert.equal(identity.auth_user,2);
+});
+
+test('interactive Music documents initialize without waiting for every subresource', () => {
+  const p=player(.5,{LOGGED_IN:true},false,'interactive');
+  assert.equal(p.messages.filter(m=>m.type==='ready').length,1);
+  assert.equal(p.messages.filter(m=>m.type==='session').at(-1).signed_in,true);
 });
 
 test('reconnecting restores a paused song only after its seek settles', () => {
