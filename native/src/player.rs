@@ -137,16 +137,20 @@ pub struct Player {
     seek_revision: Cell<u64>,
     pub session_rx: Receiver<crate::account::Capture>,
     session_tx: Sender<crate::account::Capture>,
-    session_checked: Cell<Option<Instant>>,
+    session_refresh_at: Cell<Option<Instant>>,
     repaint: egui::Context,
     identity: Cell<crate::playback_session::Identity>,
     expected_account: Cell<bool>,
+    selected_account: Cell<Option<u8>>,
+    session_recheck_attempted: Cell<bool>,
+    page_reload_attempted: Cell<bool>,
     document: RefCell<Option<String>>,
     resume: RefCell<Option<Value>>,
     restoring: Cell<bool>,
     waiting_restore: Cell<bool>,
     login_open: Cell<bool>,
     login_completed: Cell<bool>,
+    login_failed: Cell<bool>,
     google_sign_out_pending: Cell<Option<Instant>>,
     google_sign_out_result: RefCell<Option<Result<(), String>>>,
     suppress_login: Cell<bool>,
@@ -159,6 +163,9 @@ impl Player {
         let (events, incoming) = mpsc::channel();
         let (updates, rx) = mpsc::channel();
         let (session_tx, session_rx) = mpsc::channel();
+        let saved = rustified_core::session::native_enabled()
+            .then(|| rustified_core::session::load_session().ok().flatten())
+            .flatten();
         let mut result = Self {
             webview: None,
             mixer: None,
@@ -178,22 +185,20 @@ impl Player {
             seek_revision: Cell::new(0),
             session_rx,
             session_tx,
-            session_checked: Cell::new(None),
+            session_refresh_at: Cell::new(None),
             repaint: cc.egui_ctx.clone(),
             identity: Cell::new(Default::default()),
-            expected_account: Cell::new(
-                rustified_core::session::native_enabled()
-                    && rustified_core::session::load_session()
-                        .ok()
-                        .flatten()
-                        .is_some(),
-            ),
+            expected_account: Cell::new(saved.is_some()),
+            selected_account: Cell::new(saved.and_then(|session| session.auth_user)),
+            session_recheck_attempted: Cell::new(false),
+            page_reload_attempted: Cell::new(false),
             document: RefCell::new(None),
             resume: RefCell::new(None),
             restoring: Cell::new(false),
             waiting_restore: Cell::new(false),
             login_open: Cell::new(false),
             login_completed: Cell::new(false),
+            login_failed: Cell::new(false),
             google_sign_out_pending: Cell::new(None),
             google_sign_out_result: RefCell::new(None),
             suppress_login: Cell::new(false),
@@ -261,10 +266,7 @@ impl Player {
                     wry::NewWindowResponse::Deny
                 })
                 .with_url(rustified_core::session::music_url(
-                    rustified_core::session::load_session()
-                        .ok()
-                        .flatten()
-                        .and_then(|saved| saved.auth_user),
+                    result.selected_account.get(),
                 ))
                 .build_as_child(cc)?;
             if crate::account::smoke_active() {
@@ -327,6 +329,14 @@ impl Player {
                         // Resolve foreground requests without allowing an old
                         // document/account to overwrite the current session.
                         capture.result = Err(());
+                    } else {
+                        let interval = if matches!(capture.result, Ok(Some(_))) {
+                            300
+                        } else {
+                            15
+                        };
+                        self.session_refresh_at
+                            .set(Some(Instant::now() + Duration::from_secs(interval)));
                     }
                     let _ = self.session_tx.send(capture);
                 }
@@ -421,6 +431,7 @@ impl Player {
                     {
                         self.google_sign_out_pending.set(None);
                         if identity.signed_in == Some(false) {
+                            self.selected_account.set(None);
                             self.resume.borrow_mut().take();
                             self.requested.set(None);
                             self.restoring.set(false);
@@ -429,17 +440,35 @@ impl Player {
                             self.login_completed.set(false);
                             self.eval(&json!({"op":"pause"}));
                             *self.google_sign_out_result.borrow_mut() = Some(Ok(()));
+                            continue;
                         } else {
                             *self.google_sign_out_result.borrow_mut() =
                                 Some(Err("Google still reports this app as signed in.".into()));
                         }
                     }
-                    if identity.signed_in == Some(true)
-                        && previous != identity
-                        && rustified_core::session::native_enabled()
-                        && self.google_sign_out_pending.get().is_none()
+                    if identity.signed_in == Some(true) {
+                        self.session_recheck_attempted.set(false);
+                        if let Some(index) = identity.auth_user {
+                            self.selected_account.set(Some(index));
+                        }
+                        if rustified_core::session::native_enabled() {
+                            self.expected_account.set(true);
+                            if previous != identity {
+                                self.session_refresh_at
+                                    .set(Some(Instant::now() + Duration::from_secs(300)));
+                                self.capture_session(0);
+                            }
+                        }
+                    } else if identity.signed_in == Some(false)
+                        && !self.login_open.get()
+                        && self.expected_account.get()
+                        && !self.suppress_login.get()
+                        && !self.session_recheck_attempted.replace(true)
                     {
-                        self.capture_session(0);
+                        // Retry the existing browser profile once before a
+                        // guest bootstrap is surfaced as a signed-out player.
+                        self.reconnect();
+                        continue;
                     }
                     if std::env::args().any(|arg| arg == "--smoke-player-session")
                         && identity.signed_in.is_some()
@@ -487,11 +516,6 @@ impl Player {
                     }
                     self.ready.set(true);
                     self.sync_audio_identity();
-                    self.loading_since.set(None);
-                    self.session_checked.set(Some(Instant::now()));
-                    if rustified_core::session::native_enabled() {
-                        self.capture_session(0);
-                    }
                     if std::env::args().any(|arg| arg == "--smoke-stream") {
                         self.eval(&json!({"op":"diagnostic"}));
                     }
@@ -561,6 +585,8 @@ impl Player {
                     self.waiting_restore.set(false);
                     if !ad
                         && !transition
+                        && !buffering
+                        && error.is_none()
                         && duration > 0.
                         && let Some(resume) = self.resume.borrow_mut().as_mut()
                     {
@@ -570,6 +596,10 @@ impl Player {
                     }
                     if playing || error.is_some() || (!buffering && duration > 0.) {
                         self.requested.set(None);
+                    }
+                    if playing && !ad && !transition && !buffering && error.is_none() {
+                        self.prefer_direct.set(false);
+                        self.recovered.set(false);
                     }
                     let state = PlayerState {
                         seek_ack,
@@ -602,13 +632,24 @@ impl Player {
                 "YouTube did not start this track. Try Retry playback or another result.",
             );
         }
-        if !self.login_open.get()
-            && self
-                .loading_since
-                .get()
-                .is_some_and(|started| started.elapsed() > Duration::from_secs(25))
+        if self.ready.get() && self.authenticated().is_some() && !self.login_open.get() {
+            self.loading_since.set(None);
+            self.page_reload_attempted.set(false);
+        }
+        if self
+            .loading_since
+            .get()
+            .is_some_and(|started| started.elapsed() > Duration::from_secs(25))
+            && (!self.login_open.get() || self.on_music_page())
         {
             self.loading_since.set(None);
+            if self.login_open.replace(false) {
+                self.login_failed.set(true);
+            }
+            if !self.page_reload_attempted.replace(true) {
+                self.reconnect();
+                return;
+            }
             if crate::account::smoke_active()
                 && let Some(webview) = &self.webview
             {
@@ -621,16 +662,21 @@ impl Player {
                 "The playback page couldn't finish loading. Try Retry playback or Google sign-in.",
             );
         }
-        if self.ready.get()
-            && self
-                .session_checked
-                .get()
-                .is_none_or(|checked| checked.elapsed() > Duration::from_secs(300))
+        if self.authenticated() == Some(true)
+            && rustified_core::session::native_enabled()
+            && let Some(refresh_at) = self.session_refresh_at.get()
         {
-            self.session_checked.set(Some(Instant::now()));
-            if rustified_core::session::native_enabled() {
+            let remaining = refresh_at.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.session_refresh_at
+                    .set(Some(Instant::now() + Duration::from_secs(300)));
                 self.capture_session(0);
+            } else {
+                self.repaint.request_repaint_after(remaining);
             }
+        }
+        if self.loading_since.get().is_some() || self.google_sign_out_pending.get().is_some() {
+            self.repaint.request_repaint_after(Duration::from_secs(1));
         }
         if self
             .google_sign_out_pending
@@ -644,6 +690,15 @@ impl Player {
         }
     }
     pub fn capture_session(&self, id: u64) {
+        if self.authenticated() != Some(true) {
+            if id != 0 {
+                let _ = self.session_tx.send(crate::account::Capture {
+                    id,
+                    result: Err(()),
+                });
+            }
+            return;
+        }
         let tx = self.events.clone();
         let document_id = self.document.borrow().clone();
         let identity = self.identity.get();
@@ -653,7 +708,8 @@ impl Player {
                 windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32))
             })?;
             let core = unsafe { webview.controller().CoreWebView2()? };
-            rustified_core::browser_session::capture(&core, identity.auth_user, move |result| {
+            let auth_user = identity.auth_user.or(self.selected_account.get());
+            rustified_core::browser_session::capture(&core, auth_user, move |result| {
                 let _ = tx.send(BridgeEvent::Captured {
                     capture: crate::account::Capture { id, result },
                     document_id,
@@ -663,6 +719,8 @@ impl Player {
             })
         })();
         if result.is_err() {
+            self.session_refresh_at
+                .set(Some(Instant::now() + Duration::from_secs(15)));
             let _ = self.session_tx.send(crate::account::Capture {
                 id,
                 result: Err(()),
@@ -732,10 +790,21 @@ impl Player {
     pub fn take_login_completed(&self) -> bool {
         self.login_completed.replace(false)
     }
+    pub fn take_login_failed(&self) -> bool {
+        self.login_failed.replace(false)
+    }
+    fn on_music_page(&self) -> bool {
+        self.webview
+            .as_ref()
+            .and_then(|webview| webview.url().ok())
+            .is_some_and(|url| playback_origin(&url))
+    }
     pub fn begin_login(&self) {
         self.eval(&json!({"op":"pause"}));
         self.suspend();
         self.suppress_login.set(false);
+        self.session_recheck_attempted.set(false);
+        self.page_reload_attempted.set(false);
         self.login_open.set(true);
         if let Some(webview) = &self.webview {
             let _ = webview.load_url(&crate::navigation::sign_in_url());
@@ -779,10 +848,7 @@ impl Player {
     pub fn reconnect(&self) {
         self.eval(&json!({"op":"pause"}));
         self.suspend();
-        let index = rustified_core::session::load_session()
-            .ok()
-            .flatten()
-            .and_then(|saved| saved.auth_user);
+        let index = self.selected_account.get();
         let url = {
             let mut resume = self.resume.borrow_mut();
             resume

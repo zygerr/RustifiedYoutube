@@ -90,7 +90,10 @@ pub struct MusicApp {
     connecting: bool,
     connected: bool,
     account_status: String,
+    library_loading: bool,
     library_loaded: bool,
+    library_error: Option<String>,
+    account_retry_at: Option<std::time::Instant>,
     ready: bool,
     error: Option<String>,
     list_request: u64,
@@ -178,7 +181,10 @@ impl MusicApp {
             connecting: false,
             connected: false,
             account_status: "Restoring the saved Google session…".into(),
+            library_loading: false,
             library_loaded: false,
+            library_error: None,
+            account_retry_at: None,
             ready: false,
             error: None,
             list_request: 0,
@@ -433,6 +439,44 @@ impl MusicApp {
         }
     }
 
+    fn request_library(&mut self) {
+        if self.connected && !self.library_loading {
+            self.library_loading = true;
+            self.backend.send(Request::Library);
+        }
+    }
+
+    fn request_history(&mut self) {
+        if self.connected && !self.history_loading {
+            self.history_loading = true;
+            self.backend.send(Request::History);
+        }
+    }
+
+    fn retry_account_data(&mut self, ctx: &egui::Context) {
+        let Some(retry_at) = self.account_retry_at else {
+            return;
+        };
+        if !self.connected {
+            self.account_retry_at = None;
+            return;
+        }
+        let remaining = retry_at.saturating_duration_since(std::time::Instant::now());
+        if !remaining.is_zero() {
+            ctx.request_repaint_after(remaining);
+        } else if self.connecting || self.player.login_open() || self.player.needs_login() {
+            ctx.request_repaint_after(Duration::from_secs(15));
+        } else {
+            self.account_retry_at = None;
+            if self.library_error.is_some() {
+                self.request_library();
+            }
+            if self.history_error.is_some() {
+                self.request_history();
+            }
+        }
+    }
+
     fn receive(&mut self, ctx: &egui::Context) {
         self.player.pump();
         if let Some(result) = self.player.take_google_sign_out_result() {
@@ -450,6 +494,9 @@ impl MusicApp {
             if self.connecting {
                 self.backend.send(Request::Connect { force_login: false });
             }
+        }
+        if self.player.take_login_failed() {
+            self.connecting = false;
         }
         while let Ok(capture) = self.player.session_rx.try_recv() {
             self.backend.send(Request::Captured(capture));
@@ -472,13 +519,17 @@ impl MusicApp {
                     );
                     self.ready = true;
                     if connected {
-                        self.library_loaded = false;
-                        self.backend.send(Request::Library);
-                        self.history_loading = true;
-                        self.backend.send(Request::History);
+                        self.request_library();
+                        self.request_history();
                     } else {
+                        self.playlists.clear();
                         self.account_recent.clear();
+                        self.library_loading = false;
+                        self.library_loaded = false;
+                        self.library_error = None;
                         self.history_loading = false;
+                        self.history_error = None;
+                        self.account_retry_at = None;
                     }
                     if self.discover_tracks.is_empty() {
                         self.discover_loading = true;
@@ -539,7 +590,12 @@ impl MusicApp {
                             self.account_recent = tracks;
                             self.history_error = None;
                         }
-                        Err(message) => self.history_error = Some(message),
+                        Err(message) => {
+                            self.history_error = Some(message);
+                            self.account_retry_at.get_or_insert_with(|| {
+                                std::time::Instant::now() + Duration::from_secs(15)
+                            });
+                        }
                     }
                 }
                 Response::Discover(result) => {
@@ -552,16 +608,22 @@ impl MusicApp {
                         Err(message) => self.discover_error = Some(message),
                     }
                 }
-                Response::Library(result) => match result {
-                    Ok(playlists) => {
-                        self.playlists = playlists;
-                        self.library_loaded = true;
+                Response::Library(result) if self.connected => {
+                    self.library_loading = false;
+                    match result {
+                        Ok(playlists) => {
+                            self.playlists = playlists;
+                            self.library_loaded = true;
+                            self.library_error = None;
+                        }
+                        Err(message) => {
+                            self.library_error = Some(message);
+                            self.account_retry_at.get_or_insert_with(|| {
+                                std::time::Instant::now() + Duration::from_secs(15)
+                            });
+                        }
                     }
-                    Err(message) => {
-                        self.error = Some(message);
-                        self.library_loaded = false;
-                    }
-                },
+                }
                 Response::Liked(id, liked, success) => {
                     if success {
                         for track in self
@@ -830,9 +892,7 @@ impl MusicApp {
                 ) {
                     self.page = Page::Library;
                     self.expanded = false;
-                    if self.connected {
-                        self.backend.send(Request::Library);
-                    }
+                    self.request_library();
                 }
                 if Self::nav(
                     ui,
@@ -1234,8 +1294,7 @@ impl MusicApp {
                         )
                         .clicked()
                 {
-                    self.history_loading = true;
-                    self.backend.send(Request::History);
+                    self.request_history();
                 }
                 if self.history_loading {
                     ui.spinner();
@@ -1505,8 +1564,22 @@ impl MusicApp {
             }
         });
         ui.add_space(24.);
+        if let Some(message) = &self.library_error {
+            ui.label(RichText::new(message).color(colors.muted));
+            if ui
+                .add_enabled(!self.library_loading, egui::Button::new("Retry library"))
+                .clicked()
+            {
+                self.request_library();
+            }
+            ui.add_space(12.);
+        }
         if self.playlists.is_empty() {
-            ui.label(RichText::new("Your playlists will appear here. Reconnect in Settings if your library couldn't load.").color(colors.muted));
+            if self.library_loading {
+                catalog::skeleton_shelf(ui);
+            } else if self.library_loaded {
+                ui.label(RichText::new("No playlists in your library yet.").color(colors.muted));
+            }
             return;
         }
         let playlists = self.playlists.clone();
@@ -2216,7 +2289,8 @@ impl MusicApp {
         {
             self.connecting = true;
             self.backend.send(Request::Connect {
-                force_login: self.player.authenticated() != Some(true),
+                force_login: self.player.needs_login()
+                    || (!self.connected && self.player.authenticated() != Some(true)),
             });
         }
         if ui
@@ -2334,6 +2408,7 @@ impl eframe::App for MusicApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let colors = crate::theme::palette(ctx);
         self.receive(ctx);
+        self.retry_account_data(ctx);
         self.check_stream(ctx);
         self.check_account(ctx);
         self.discord.update(

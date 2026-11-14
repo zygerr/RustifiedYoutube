@@ -124,9 +124,13 @@ impl Catalog {
         let request = http
             .get(crate::session::music_url(auth_user))
             .header("Cookie", cookie.unwrap_or("SOCS=CAI"));
-        let html = request.send().await?.error_for_status()?.text().await?;
-        if cookie.is_some() && config_value::<bool>(&html, "LOGGED_IN").ok() == Some(false) {
-            return Err(SessionExpired.into());
+        let response = request.send().await?;
+        if cookie.is_some() && matches!(response.status().as_u16(), 401 | 403) {
+            return Err(AuthRejected.into());
+        }
+        let html = response.error_for_status()?.text().await?;
+        if cookie.is_some() {
+            check_authenticated_bootstrap(&html)?;
         }
         let visitor_id = config_string(&html, "VISITOR_DATA")?;
         let client_version = config_string(&html, "INNERTUBE_CLIENT_VERSION")?;
@@ -139,8 +143,7 @@ impl Catalog {
             .build()?;
         let signed = match cookie {
             Some(cookie) => {
-                let sapisid =
-                    crate::session::authentication_cookie(cookie).ok_or(SessionExpired)?;
+                let sapisid = crate::session::authentication_cookie(cookie).ok_or(AuthRejected)?;
                 let token: BrowserToken = serde_json::from_value(
                     serde_json::json!({"sapisid": sapisid, "client_version": client_version, "cookies": cookie}),
                 )?;
@@ -550,6 +553,15 @@ fn collect_library(value: &serde_json::Value, page: &mut LibraryPage) {
 fn config_string(html: &str, key: &str) -> Result<String> {
     config_value(html, key)
 }
+fn check_authenticated_bootstrap(html: &str) -> Result<()> {
+    // A standalone HTTP request has a different context from the logged-in
+    // WebView. A guest page or incomplete response cannot establish logout.
+    if config_value::<bool>(html, "LOGGED_IN").ok() == Some(false) {
+        return Err(AuthRejected.into());
+    }
+    Ok(())
+}
+
 fn config_value<T: serde::de::DeserializeOwned>(html: &str, key: &str) -> Result<T> {
     let marker = format!("\"{key}\":");
     let (_, value) = html
@@ -609,6 +621,15 @@ mod bootstrap_tests {
             super::config_value::<bool>(r#"ytcfg.set({"LOGGED_IN":true});"#, "LOGGED_IN").unwrap()
         );
     }
+    #[test]
+    fn guest_library_bootstrap_requests_recovery_without_reporting_expiry() {
+        let error =
+            super::check_authenticated_bootstrap(r#"ytcfg.set({"LOGGED_IN":false});"#).unwrap_err();
+        assert!(super::is_auth_error(&error));
+        assert!(!super::is_expired_error(&error));
+        super::check_authenticated_bootstrap(r#"ytcfg.set({"LOGGED_IN":true});"#).unwrap();
+    }
+
     #[test]
     fn history_keeps_order_full_titles_and_fixed_duration() {
         let row = |id, title: &str| {

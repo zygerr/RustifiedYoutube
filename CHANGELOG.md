@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.16
+
+- Recover from rejected library requests without treating them as Google logout. Preserve loaded playlists and history and retry their requests after transient failures.
+- Refresh cookies from the confirmed playback account on a timer, including while the interface is idle. Retry incomplete captures sooner and reopen the saved playback profile once when its initial account check fails.
+- Recover once from a stalled playback page, release the sign-in panel if its return to Music stalls, and preserve the selected account and track position during retries.
+
 ## 0.3.15
 
 - Keep confirmed playback identity during temporary missing configuration and require a sustained explicit signed-out signal; Google account handoffs and individual track restrictions no longer declare the entire account signed out.

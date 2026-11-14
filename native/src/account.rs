@@ -1,7 +1,7 @@
 use crate::backend::Response;
 use anyhow::{Context, Result};
 use rustified_core::{
-    api::{AuthRejected, Catalog, SessionExpired, is_auth_error, is_expired_error},
+    api::{AuthRejected, Catalog, SessionExpired, is_auth_error},
     session::{self, SavedSession},
 };
 use std::{
@@ -14,16 +14,6 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{Mutex, RwLock, watch};
-
-// Only confirmed expiry needs a sign-in panel. Request rejection or network
-// failure is recoverable and must not reopen Google on an otherwise valid login.
-fn connection_needs_login(result: Result<bool>) -> Result<bool> {
-    match result {
-        Ok(signed_in) => Ok(!signed_in),
-        Err(error) if is_expired_error(&error) => Ok(true),
-        Err(error) => Err(error),
-    }
-}
 
 pub fn smoke_active() -> bool {
     std::env::args().any(|arg| {
@@ -89,9 +79,6 @@ impl Account {
         } else {
             "Native library disconnected"
         });
-        if enabled {
-            account.send(Response::CaptureSession(0));
-        }
         account
     }
     fn send(&self, response: Response) {
@@ -107,10 +94,10 @@ impl Account {
             self.send(Response::Ready(value));
         }
     }
-    async fn store(&self, mut saved: SavedSession) -> Result<()> {
+    async fn store(&self, mut saved: SavedSession) -> Result<bool> {
         let mut state = self.state.write().await;
         if !state.enabled || state.signing_out {
-            return Ok(());
+            return Ok(false);
         }
         if saved.auth_user.is_none() {
             saved.auth_user = state.saved.as_ref().and_then(|saved| saved.auth_user);
@@ -127,7 +114,10 @@ impl Account {
             state.client = None;
             state.revision += 1;
         }
-        Ok(())
+        // A capture comes from the authenticated playback document. Library
+        // requests can recover independently once the browser session is saved.
+        self.connected(true);
+        Ok(true)
     }
     async fn client(&self) -> Result<(u64, Arc<Catalog>)> {
         let _bootstrap = self.bootstrap.lock().await;
@@ -137,7 +127,14 @@ impl Account {
                 if let Some(client) = &state.client {
                     return Ok((state.revision, client.clone()));
                 }
-                (state.revision, state.saved.clone())
+                (
+                    state.revision,
+                    if state.enabled {
+                        state.saved.clone()
+                    } else {
+                        None
+                    },
+                )
             };
             let result = match &saved {
                 Some(saved) => Catalog::from_session(saved).await,
@@ -149,7 +146,6 @@ impl Account {
             }
             let client = Arc::new(result?);
             state.client = Some(client.clone());
-            drop(state);
             if client.signed_in() {
                 self.connected(true);
                 self.status("Google account connected · browser session synchronized");
@@ -163,7 +159,7 @@ impl Account {
         self.send(Response::CaptureSession(id));
         let capture = tokio::time::timeout(
             Duration::from_secs(8),
-            captures.wait_for(|capture| capture.as_ref().is_some_and(|capture| capture.id >= id)),
+            captures.wait_for(|capture| capture.as_ref().is_some_and(|capture| capture.id == id)),
         )
         .await
         .context("Browser session refresh timed out")?
@@ -184,26 +180,22 @@ impl Account {
         }
         let empty = matches!(capture.result, Ok(None));
         if let Ok(Some(saved)) = capture.result {
-            if self.store(saved).await.is_err() {
-                self.status("Couldn't save the Google session. Try reconnecting in Settings.");
-                return;
+            match self.store(saved).await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(_) => {
+                    self.status("Couldn't save the Google session. Try refreshing the connection in Settings.");
+                    return;
+                }
             }
             match self.client().await {
-                Ok((_, client)) if client.signed_in() => {
-                    self.connected(true);
-                    self.status("Google account connected · browser session synchronized");
-                }
-                Err(error) if is_expired_error(&error) => {
-                    self.connected(false);
-                    self.status("Google requires sign-in. Choose Continue with Google.");
-                }
+                Ok(_) => {}
                 Err(error) if is_auth_error(&error) => self.status(
-                    "Google account kept · YouTube didn't authorize this request. Try again.",
+                    "Library connection interrupted. Retrying with the saved Google account…",
                 ),
                 Err(_) => {
                     self.status("Google session saved · waiting for the connection to return")
                 }
-                _ => {}
             }
         } else if empty && self.state.read().await.saved.is_none() {
             self.status("Not connected · use Continue with Google to open your library");
@@ -283,13 +275,8 @@ impl Account {
             if self.control_epoch.load(Ordering::SeqCst) != epoch {
                 anyhow::bail!("Account connection changed");
             }
-            if result.as_ref().is_err_and(is_expired_error) {
-                self.connected(false);
-                self.status("Google requires sign-in. Choose Continue with Google.");
-            } else if result.as_ref().is_err_and(is_auth_error) {
-                self.status(
-                    "Google account kept · YouTube didn't authorize this request. Try again.",
-                );
+            if result.as_ref().is_err_and(is_auth_error) {
+                self.status("Library connection interrupted. Your saved account will be retried.");
             } else if result.is_err() {
                 self.status("Google session saved · check your internet connection");
             }
@@ -328,32 +315,27 @@ impl Account {
             }
         };
         self.status("Reusing the Google account saved in this app…");
-        let captured = if force_login {
-            None
-        } else {
-            self.capture().await?
-        };
+        if force_login {
+            self.status("Complete Google sign-in in the account panel.");
+            return Ok(false);
+        }
+        let captured = self.capture().await?;
         anyhow::ensure!(
             self.control_epoch.load(Ordering::SeqCst) == epoch,
             "Account connection changed"
         );
-        let mut has_session = self.state.read().await.saved.is_some();
         if let Some(saved) = captured {
             self.store(saved).await?;
-            has_session = true;
         }
-        let needs_login = if force_login || !has_session {
-            true
-        } else {
-            // A temporarily empty browser snapshot must not force another
-            // login. Verify the preserved session before deciding it expired.
-            self.state.write().await.client = None;
-            connection_needs_login(self.client().await.map(|(_, client)| client.signed_in()))?
-        };
-        if needs_login {
-            self.status("Complete Google sign-in in the account panel.");
-            return Ok(false);
+        {
+            // A refresh must not open the sign-in panel as a side effect.
+            let mut state = self.state.write().await;
+            anyhow::ensure!(state.saved.is_some(), AuthRejected);
+            state.client = None;
+            state.revision += 1;
         }
+        let (_, client) = self.client().await?;
+        anyhow::ensure!(client.signed_in(), AuthRejected);
         anyhow::ensure!(
             self.control_epoch.load(Ordering::SeqCst) == epoch,
             "Account connection changed"
@@ -429,19 +411,6 @@ impl Account {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn reconnect_opens_sign_in_only_for_confirmed_expiry_or_guest() {
-        assert!(!connection_needs_login(Ok(true)).unwrap());
-        assert!(connection_needs_login(Ok(false)).unwrap());
-        assert!(connection_needs_login(Err(SessionExpired.into())).unwrap());
-        for error in [
-            anyhow::Error::from(AuthRejected),
-            anyhow::anyhow!("Network timeout"),
-        ] {
-            assert!(connection_needs_login(Err(error)).is_err());
-        }
-    }
-
     fn fixture(enabled: bool) -> (Arc<Account>, mpsc::Receiver<Response>) {
         let (responses, receiver) = mpsc::channel();
         let (captures, _) = watch::channel(None);
@@ -565,7 +534,7 @@ mod tests {
             .await;
         let error = task.await.unwrap().unwrap_err();
         assert!(is_auth_error(&error));
-        assert!(!is_expired_error(&error));
+        assert!(!rustified_core::api::is_expired_error(&error));
         assert!(account.reported.load(Ordering::SeqCst));
         assert_eq!(
             account.state.read().await.saved.as_ref().unwrap().cookies,
