@@ -47,7 +47,7 @@ Login and playback reuse this application's dedicated WebView2 profile and the s
 
 ## Controls
 
-Use the native player bar or tray menu. `Ctrl+Alt+Space` toggles playback and `Ctrl+Q` exits, including when the video surface has focus. Closing the window keeps playback in the tray by default; change that in Settings. Click the tray icon to restore the window. The version is visible in the sidebar, Settings, About, and tray tooltip.
+Use the native player bar, tray menu, or your keyboard's media keys (Play/Pause, Next, Previous), which also work with headset buttons and the Windows media flyout. `Ctrl+Alt+Space` toggles playback and `Ctrl+Q` exits, including when the video surface has focus. Closing the window keeps playback in the tray by default; change that in Settings. Click the tray icon to restore the window. The version is visible in the sidebar, Settings, About, and tray tooltip.
 
 Scroll up/down over the volume slider or percentage. **Settings → Playback → Volume step per scroll notch** accepts an integer from **1% to 100%**, with a default of 5%. Volume remains within 0–100%, and the step is saved across launches.
 

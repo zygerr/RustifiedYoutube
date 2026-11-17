@@ -102,6 +102,16 @@ enum BridgeEvent {
 enum Shortcut {
     Toggle,
     Quit,
+    Next,
+    Previous,
+}
+
+/// Queue navigation requested from the page's media session (keyboard media
+/// keys, headset buttons, the Windows media flyout); the app owns the queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaAction {
+    Next,
+    Previous,
 }
 
 #[derive(Deserialize, Debug)]
@@ -134,6 +144,7 @@ pub struct Player {
     video: Cell<bool>,
     last_bounds: Cell<Option<[i32; 4]>>,
     quit_requested: Cell<bool>,
+    media_action: Cell<Option<MediaAction>>,
     seek_revision: Cell<u64>,
     pub session_rx: Receiver<crate::account::Capture>,
     session_tx: Sender<crate::account::Capture>,
@@ -182,6 +193,7 @@ impl Player {
             video: Cell::new(false),
             last_bounds: Cell::new(None),
             quit_requested: Cell::new(false),
+            media_action: Cell::new(None),
             seek_revision: Cell::new(0),
             session_rx,
             session_tx,
@@ -311,6 +323,9 @@ impl Player {
     }
     pub fn take_quit(&self) -> bool {
         self.quit_requested.replace(false)
+    }
+    pub fn take_media_action(&self) -> Option<MediaAction> {
+        self.media_action.take()
     }
     pub fn pump(&self) {
         while let Ok(event) = self.incoming.try_recv() {
@@ -505,6 +520,12 @@ impl Player {
                 BridgeEvent::Shortcut {
                     action: Shortcut::Quit,
                 } => self.quit_requested.set(true),
+                BridgeEvent::Shortcut {
+                    action: Shortcut::Next,
+                } => self.media_action.set(Some(MediaAction::Next)),
+                BridgeEvent::Shortcut {
+                    action: Shortcut::Previous,
+                } => self.media_action.set(Some(MediaAction::Previous)),
                 BridgeEvent::Ready { document_id } => {
                     if document_id.len() > 128 {
                         continue;

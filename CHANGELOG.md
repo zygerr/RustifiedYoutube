@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.19
+
+- Route keyboard media keys, headset buttons and the Windows media flyout through the app. Play/Pause no longer pauses for a moment and then resumes, and Next/Previous follow the app's queue instead of YouTube's.
+
 ## 0.3.18
 
 - Keep a paused song in Discord Rich Presence without its progress bar, and send the pause immediately instead of waiting for the update throttle.

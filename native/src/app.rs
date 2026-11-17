@@ -521,6 +521,11 @@ impl MusicApp {
             self.quit = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        match self.player.take_media_action() {
+            Some(crate::player::MediaAction::Next) => self.next(),
+            Some(crate::player::MediaAction::Previous) => self.previous(),
+            None => {}
+        }
         while let Ok(response) = self.backend.rx.try_recv() {
             match response {
                 Response::Ready(connected) => {

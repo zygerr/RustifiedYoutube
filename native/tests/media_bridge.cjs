@@ -57,7 +57,10 @@ function player(initialVolume = .5, identity = {}, autoplay = true, readyState =
     getElementById: () => ({classList: {contains: () => advertisement}}),
     dispatchEvent(event) {navigations++;if(!acceptNavigation)return;id = event.detail.endpoint.watchEndpoint.videoId;if(id==='Fixture0001')title='NOVA LANE - Night shift (Official Video)';}
   };
+  const mediaHandlers = new Map();
+  const mediaSession = {setActionHandler(action, handler) {mediaHandlers.set(action, handler);}};
   const context = vm.createContext({
+    navigator: {mediaSession},
     document, location: {origin: 'https://music.youtube.com'},
     window: {ytcfg:{get:key=>identity[key]},__rustifiedInitialVolume:initialVolume,ipc: {postMessage: text => messages.push(JSON.parse(text))}},
     HTMLMediaElement:MockMedia,
@@ -75,6 +78,7 @@ function player(initialVolume = .5, identity = {}, autoplay = true, readyState =
   if(autoplay) command({op: 'play', id, generation: 1}); tick();
   return {
     command, tick, messages, identity, get media() {return media;}, playedVolumes,
+    mediaSession, mediaKey(action) {mediaHandlers.get(action)?.();},
     document,
     mutate(node) {mutationObserver.callback([{addedNodes:[node]}]);},
     queryAllCalls() {return queryAllCalls;},
@@ -306,4 +310,28 @@ test('an old track login response cannot mark a new requested track as signed ou
   const p=player();p.rejectNavigation();p.status('LOGIN_REQUIRED');
   p.command({op:'play',id:'Fixture0002',generation:2});p.tick(5000);
   assert.equal(p.messages.filter(m=>m.type==='stalled').at(-1).status,'NAVIGATION_STALLED');
+});
+
+test('keyboard media keys go through the app instead of fighting the resume loop', () => {
+  const p = player();
+  const shortcuts = () => p.messages.filter(message => message.type === 'shortcut').map(message => message.action);
+  // YouTube's own handlers registered later must not replace the app's routing.
+  let youtubePaused = false;
+  p.mediaSession.setActionHandler('pause', () => {youtubePaused = true; p.media.pause();});
+  p.mediaKey('pause');
+  assert.equal(youtubePaused, false);
+  assert.deepEqual(shortcuts(), ['toggle']);
+  // The app answers with its toggle command; the pause must then stick.
+  p.command({op: 'toggle'});
+  for (let i = 0; i < 10; i++) p.tick();
+  assert.equal(p.media.paused, true);
+  assert.equal(p.tick().playing, false);
+  // A repeated pause is not turned into a second toggle that would resume.
+  p.mediaKey('pause');
+  assert.deepEqual(shortcuts(), ['toggle']);
+  p.mediaKey('play');
+  assert.deepEqual(shortcuts(), ['toggle', 'toggle']);
+  p.mediaKey('nexttrack');
+  p.mediaKey('previoustrack');
+  assert.deepEqual(shortcuts(), ['toggle', 'toggle', 'next', 'previous']);
 });

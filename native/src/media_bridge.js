@@ -172,6 +172,30 @@
       event.preventDefault(); send({type:'shortcut',action:'toggle'});
     }
   }, true);
+  // Keyboard media keys, headset buttons and the Windows media flyout reach the
+  // page through the Media Session API. Left to YouTube they pause the element
+  // directly, the app still wants playback and resumes it a moment later, and
+  // next/previous would advance YouTube's queue instead of ours. Claim those
+  // actions before YouTube's scripts run and route them through the app.
+  const mediaSession = globalThis.navigator?.mediaSession;
+  if (mediaSession && typeof mediaSession.setActionHandler === 'function') {
+    const setHandler = mediaSession.setActionHandler.bind(mediaSession);
+    const want = playing => () => {
+      if (session.generation && session.playing !== playing) send({type:'shortcut',action:'toggle'});
+    };
+    const routed = {
+      play: want(true), pause: want(false), stop: want(false),
+      nexttrack: () => send({type:'shortcut',action:'next'}),
+      previoustrack: () => send({type:'shortcut',action:'previous'})
+    };
+    for (const [action, handler] of Object.entries(routed)) {
+      try { setHandler(action, handler); } catch {}
+    }
+    mediaSession.setActionHandler = (action, handler) => {
+      if (Object.hasOwn(routed, action)) return;
+      return setHandler(action, handler);
+    };
+  }
   setInterval(() => {
     style();
     const media = video();
