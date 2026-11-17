@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.17
+
+- Start a shuffled queue with the selected track and shuffle every other track after it, so tracks listed above the selection are no longer skipped.
+- Reset library and history loading state, errors and pending retries after Google sign-out so the next connection loads the library again.
+- Replace a re-fetched cover's cache entry instead of letting its stale entry evict the new artwork early.
+- Remove the temporary encrypted session file when saving the session fails.
+
 ## 0.3.16
 
 - Recover from rejected library requests without treating them as Google logout. Preserve loaded playlists and history and retry their requests after transient failures.
