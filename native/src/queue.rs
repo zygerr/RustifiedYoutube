@@ -7,6 +7,16 @@ pub fn shuffle_remaining<T>(queue: &mut [T], current: Option<usize>, rng: &mut i
         .min(queue.len());
     queue[start..].shuffle(rng);
 }
+/// Starts a shuffled queue at `selected`: the chosen track plays first and every
+/// other track, including those listed before it, is shuffled after it.
+pub fn shuffle_from<T>(queue: &mut [T], selected: usize, rng: &mut impl Rng) -> usize {
+    if selected >= queue.len() {
+        return selected;
+    }
+    queue[..=selected].rotate_right(1);
+    shuffle_remaining(queue, Some(0), rng);
+    0
+}
 pub fn restore_remaining(queue: &mut [Track], original: &[Track], current: Option<usize>) {
     let positions: std::collections::HashMap<_, _> = original
         .iter()
@@ -39,6 +49,16 @@ mod tests {
         let mut rest = queue[3..].to_vec();
         rest.sort();
         assert_eq!(rest, vec![3, 4, 5, 6, 7]);
+    }
+    #[test]
+    fn starting_a_shuffled_queue_keeps_tracks_listed_before_the_selection() {
+        let mut queue = vec![0, 1, 2, 3, 4, 5, 6, 7];
+        let start = super::shuffle_from(&mut queue, 5, &mut rand::rngs::StdRng::seed_from_u64(7));
+        assert_eq!(start, 0);
+        assert_eq!(queue[0], 5);
+        let mut rest = queue[1..].to_vec();
+        rest.sort();
+        assert_eq!(rest, vec![0, 1, 2, 3, 4, 6, 7]);
     }
     #[test]
     fn disabling_shuffle_restores_only_unplayed_tracks() {

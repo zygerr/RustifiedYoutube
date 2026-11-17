@@ -89,12 +89,18 @@ pub fn save_session(session: &SavedSession) -> Result<()> {
     let encrypted = crypt(&serde_json::to_vec(session)?, true)?;
     let directory = app_dir()?;
     let temporary = directory.join(format!("session-{}.dpapi.tmp", std::process::id()));
-    let mut file = fs::File::create(&temporary)?;
-    std::io::Write::write_all(&mut file, &encrypted)?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(temporary, directory.join("session.dpapi"))?;
-    Ok(())
+    let written = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&temporary)?;
+        std::io::Write::write_all(&mut file, &encrypted)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, directory.join("session.dpapi"))
+    })();
+    if written.is_err() {
+        // Never leave encrypted credential fragments behind on failure.
+        let _ = fs::remove_file(&temporary);
+    }
+    Ok(written?)
 }
 pub fn load_session() -> Result<Option<SavedSession>> {
     let path = app_dir()?.join("session.dpapi");

@@ -385,11 +385,16 @@ impl MusicApp {
     }
 
     fn start_queue(&mut self, tracks: Vec<Track>, index: usize) {
+        if index >= tracks.len() {
+            return;
+        }
         self.queue_original = tracks.clone();
         self.queue = tracks;
-        if self.shuffle {
-            crate::queue::shuffle_remaining(&mut self.queue, Some(index), &mut rand::rng());
-        }
+        let index = if self.shuffle {
+            crate::queue::shuffle_from(&mut self.queue, index, &mut rand::rng())
+        } else {
+            index
+        };
         self.play_at(index);
     }
     fn toggle_shuffle(&mut self) {
@@ -437,6 +442,17 @@ impl MusicApp {
         } else if let Some(index) = self.current {
             self.play_at(index.saturating_sub(1));
         }
+    }
+
+    fn clear_account_data(&mut self) {
+        self.playlists.clear();
+        self.account_recent.clear();
+        self.library_loading = false;
+        self.library_loaded = false;
+        self.library_error = None;
+        self.history_loading = false;
+        self.history_error = None;
+        self.account_retry_at = None;
     }
 
     fn request_library(&mut self) {
@@ -522,14 +538,7 @@ impl MusicApp {
                         self.request_library();
                         self.request_history();
                     } else {
-                        self.playlists.clear();
-                        self.account_recent.clear();
-                        self.library_loading = false;
-                        self.library_loaded = false;
-                        self.library_error = None;
-                        self.history_loading = false;
-                        self.history_error = None;
-                        self.account_retry_at = None;
+                        self.clear_account_data();
                     }
                     if self.discover_tracks.is_empty() {
                         self.discover_loading = true;
@@ -565,9 +574,10 @@ impl MusicApp {
                     }
                     if success {
                         self.connected = false;
-                        self.playlists.clear();
-                        self.account_recent.clear();
-                        self.history_loading = false;
+                        // A library or history request still in flight is
+                        // dropped once disconnected; reset its loading flag so
+                        // the next connection can request the data again.
+                        self.clear_account_data();
                         self.player.require_account(false);
                     }
                 }
@@ -653,6 +663,11 @@ impl MusicApp {
                     }
                 }
                 Response::Cover(url, image) => {
+                    // A re-fetched cover replaces its old texture; drop the stale
+                    // eviction entry so it cannot evict the new texture early.
+                    if self.textures.remove(&url).is_some() {
+                        self.texture_order.retain(|old| old != &url);
+                    }
                     let bytes = image.width() * image.height() * 4;
                     let mut used = self
                         .textures
