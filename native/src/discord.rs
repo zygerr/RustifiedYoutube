@@ -122,13 +122,23 @@ fn text(value: &str, fallback: &str) -> String {
     }
     value
 }
+/// Builds a Listening activity. While playing it carries start/end timestamps
+/// for Discord's progress bar; a paused track stays visible without them.
+/// Ads, buffering, errors, an ended track and an unloaded player clear it.
 fn activity(track: Option<&Track>, state: &PlayerState, now: i64) -> Option<Value> {
     let track = track.filter(|track| valid_video_id(&track.id))?;
-    if !state.playing || state.ad || state.buffering || state.error.is_some() {
+    let paused =
+        !state.playing && !state.ended && state.duration.is_finite() && state.duration > 0.0;
+    if !(state.playing || paused) || state.ad || state.buffering || state.error.is_some() {
         return None;
     }
     let title = text(&track.title, "YouTube Music");
     let artist = text(&track.artist, "Unknown artist");
+    let cover_text = if track.album.trim().is_empty() {
+        title.clone()
+    } else {
+        text(&track.album, "")
+    };
     let link = format!("https://music.youtube.com/watch?v={}", track.id);
     let cover = reqwest::Url::parse(&track.cover)
         .ok()
@@ -144,9 +154,13 @@ fn activity(track: Option<&Track>, state: &PlayerState, now: i64) -> Option<Valu
         .map(|url| url.to_string())
         .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", track.id));
     let mut value = json!({"type":2,"details":title,"state":artist,"details_url":link,
-        "assets":{"large_image":cover,"large_text":title},
+        "assets":{"large_image":cover,"large_text":cover_text},
         "buttons":[{"label":"Listen on YouTube Music","url":link}]});
-    if state.position.is_finite() && state.duration.is_finite() && state.duration > 0.0 {
+    if state.playing
+        && state.position.is_finite()
+        && state.duration.is_finite()
+        && state.duration > 0.0
+    {
         let position = state.position.clamp(0.0, state.duration);
         value["timestamps"] = json!({"start":now-position as i64,"end":now+(state.duration-position).max(0.0) as i64});
     }
@@ -293,7 +307,16 @@ async fn session(
         let dirty = last_sent
             .as_ref()
             .is_none_or(|last| !equivalent(last, &latest.activity));
-        if dirty && (latest.activity.is_none() || Instant::now() >= next_send) {
+        // Clearing presence or progress (pause) is sent at once; other updates
+        // respect the throttle that keeps us within Discord's rate limit.
+        let has_progress = |activity: &Option<Value>| {
+            activity
+                .as_ref()
+                .is_some_and(|a| a.get("timestamps").is_some())
+        };
+        let clears_progress = latest.activity.is_none()
+            || (!has_progress(&latest.activity) && last_sent.as_ref().is_some_and(has_progress));
+        if dirty && (clears_progress || Instant::now() >= next_send) {
             nonce += 1;
             set_activity(&mut writer, &latest.activity, nonce).await?;
             awaiting_ack = Some((
@@ -441,9 +464,35 @@ mod tests {
         );
     }
     #[test]
-    fn paused_ads_buffering_and_idle_clear_presence() {
+    fn paused_track_stays_listed_without_progress_and_shows_album() {
+        let value = activity(
+            Some(&Track {
+                album: "Album name".into(),
+                ..track()
+            }),
+            &PlayerState {
+                playing: false,
+                position: 30.,
+                duration: 200.,
+                ..Default::default()
+            },
+            1000,
+        )
+        .unwrap();
+        assert_eq!(value["type"], 2);
+        assert_eq!(value["state"], "Nova Lane");
+        assert_eq!(value["assets"]["large_text"], "Album name");
+        assert!(value.get("timestamps").is_none());
+    }
+    #[test]
+    fn ended_ads_buffering_and_idle_clear_presence() {
         for state in [
             PlayerState::default(),
+            PlayerState {
+                ended: true,
+                duration: 200.,
+                ..Default::default()
+            },
             PlayerState {
                 playing: true,
                 ad: true,
@@ -554,6 +603,57 @@ mod tests {
         )
         .await
         .unwrap();
+        updates.send_modify(|update| update.enabled = false);
+        let (_, clear) = timeout(IO_TIMEOUT, read_frame(&mut server))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(serde_json::from_slice::<Value>(&clear).unwrap()["args"]["activity"].is_null());
+        timeout(IO_TIMEOUT, task).await.unwrap().unwrap().unwrap();
+    }
+    #[tokio::test]
+    async fn pausing_removes_progress_without_waiting_for_the_throttle() {
+        let playing = PlayerState {
+            playing: true,
+            position: 30.,
+            duration: 200.,
+            ..Default::default()
+        };
+        let (client, mut server) = tokio::io::duplex(4096);
+        let (updates, mut receiver) = watch::channel(Update {
+            enabled: true,
+            application_id: APPLICATION_ID.into(),
+            activity: activity(Some(&track()), &playing, 1000),
+        });
+        let task = tokio::spawn(async move { session(client, &mut receiver, &|_| {}).await });
+        let ack = |nonce: &Value| {
+            serde_json::to_vec(&json!({"cmd":"SET_ACTIVITY","nonce":nonce,"data":null})).unwrap()
+        };
+        let (_, first) = timeout(IO_TIMEOUT, read_frame(&mut server))
+            .await
+            .unwrap()
+            .unwrap();
+        let first: Value = serde_json::from_slice(&first).unwrap();
+        assert!(first["args"]["activity"]["timestamps"].is_object());
+        write_frame(&mut server, 1, &ack(&first["nonce"]))
+            .await
+            .unwrap();
+        let paused = PlayerState {
+            playing: false,
+            ..playing
+        };
+        updates.send_modify(|update| update.activity = activity(Some(&track()), &paused, 1001));
+        // The regular throttle is five seconds; the pause must arrive well before it.
+        let (_, pause) = timeout(IO_TIMEOUT, read_frame(&mut server))
+            .await
+            .unwrap()
+            .unwrap();
+        let pause: Value = serde_json::from_slice(&pause).unwrap();
+        assert_eq!(pause["args"]["activity"]["type"], 2);
+        assert!(pause["args"]["activity"].get("timestamps").is_none());
+        write_frame(&mut server, 1, &ack(&pause["nonce"]))
+            .await
+            .unwrap();
         updates.send_modify(|update| update.enabled = false);
         let (_, clear) = timeout(IO_TIMEOUT, read_frame(&mut server))
             .await

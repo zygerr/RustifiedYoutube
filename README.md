@@ -57,7 +57,7 @@ The saved volume is applied before playback starts and limits new audio/video so
 
 ## Discord Rich Presence
 
-Keep Discord desktop running and play a song. Rich Presence shows the song, artist, cover, progress, and a **Listen on YouTube Music** button. **Settings → Discord Rich Presence** enables or disables sharing and shows the connection status. Presence is cleared on pause, buffering, advertisements, or exit, and the client reconnects when Discord restarts.
+Keep Discord desktop running and play a song. Rich Presence shows **Listening to** the song, artist, cover (with the album name on hover when known), progress, and a **Listen on YouTube Music** button. **Settings → Discord Rich Presence** enables or disables sharing and shows the connection status. Pausing keeps the song listed but removes the progress bar immediately. Presence is cleared on buffering, advertisements, playback errors, the end of the queue, or exit. Presence runs on its own background thread, so Discord being closed, restarting, or misbehaving never blocks playback or the interface; the client keeps retrying and connects automatically when Discord starts.
 
 The default public Application ID is `1568660934296076398`. You can override it under **Application settings** using an application registered in the [Discord Developer Portal](https://discord.com/developers/applications). This uses Discord's [local RPC protocol](https://docs.discord.com/developers/topics/rpc); no account login, bot token, or client secret is needed. YouTube/Google session data never enters the RPC payload. Discord's own activity-sharing settings must also allow the activity to be visible.
 

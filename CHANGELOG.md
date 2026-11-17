@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.18
+
+- Keep a paused song in Discord Rich Presence without its progress bar, and send the pause immediately instead of waiting for the update throttle.
+- Show the album name on the Discord cover hover text when it is known.
+
 ## 0.3.17
 
 - Start a shuffled queue with the selected track and shuffle every other track after it, so tracks listed above the selection are no longer skipped.
