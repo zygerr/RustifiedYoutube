@@ -111,6 +111,7 @@ pub struct MusicApp {
     tray: Option<tray_icon::TrayIcon>,
     tray_rx: mpsc::Receiver<TrayAction>,
     quit: bool,
+    window_guard: crate::window::Guard,
     about: bool,
     timeline: crate::timeline::Timeline,
     expanded: bool,
@@ -202,6 +203,7 @@ impl MusicApp {
             tray,
             tray_rx,
             quit: false,
+            window_guard: crate::window::Guard::new(cc.storage),
             about: false,
             timeline: crate::timeline::Timeline::default(),
             expanded: false,
@@ -2427,6 +2429,7 @@ impl MusicApp {
 impl eframe::App for MusicApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let colors = crate::theme::palette(ctx);
+        self.window_guard.check_startup(ctx);
         self.receive(ctx);
         self.retry_account_data(ctx);
         self.check_stream(ctx);
@@ -2613,6 +2616,7 @@ impl eframe::App for MusicApp {
         {
             return;
         }
+        self.window_guard.repair(storage);
         self.preferences.volume = Some(self.volume);
         eframe::set_value(storage, "preferences", &self.preferences);
     }

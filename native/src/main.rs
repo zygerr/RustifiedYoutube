@@ -17,6 +17,7 @@ mod taskbar;
 mod theme;
 mod timeline;
 mod volume;
+mod window;
 
 pub static STREAM_CHECK_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -79,11 +80,11 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size(if preview::compact() {
-                [1080., 700.]
+                window::COMPACT_SIZE
             } else {
-                [1440., 900.]
+                window::DEFAULT_SIZE
             })
-            .with_min_inner_size([1080., 700.])
+            .with_min_inner_size(window::MIN_SIZE)
             .with_icon(icon),
         renderer: eframe::Renderer::Wgpu,
         persist_window: !smoke,

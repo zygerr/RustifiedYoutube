@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.20
+
+- Fix the main window sometimes opening as a tiny box (for example after a Windows restart) until it was maximized or minimized. Geometry saved while the window was minimized or hidden in the tray is no longer persisted, and a window restored below the minimum size is enlarged on launch.
+
 ## 0.3.19
 
 - Route keyboard media keys, headset buttons and the Windows media flyout through the app. Play/Pause no longer pauses for a moment and then resumes, and Next/Previous follow the app's queue instead of YouTube's.
