@@ -7,6 +7,7 @@ mod catalog_ui;
 mod discord;
 mod fonts;
 mod icons;
+mod logs;
 mod mixer;
 mod navigation;
 mod playback_session;
@@ -23,6 +24,7 @@ pub static STREAM_CHECK_FAILED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 fn main() -> eframe::Result {
+    logs::init();
     if std::env::args().any(|arg| arg == "--smoke-artwork") {
         if let Err(error) = artwork::smoke() {
             eprintln!("Artwork check failed: {error}");
@@ -46,6 +48,7 @@ fn main() -> eframe::Result {
     let instance = single_instance::SingleInstance::new("RustifiedYoutube-native")
         .expect("single instance mutex");
     if !smoke && !instance.is_single() {
+        logs::info("app", "Another instance is running; focusing its window");
         use windows::{
             Win32::UI::WindowsAndMessaging::{
                 FindWindowW, SW_RESTORE, SetForegroundWindow, ShowWindow,
@@ -96,6 +99,10 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| Ok(Box::new(app::MusicApp::new(cc, taskbar_events)))),
     );
+    match &result {
+        Ok(()) => logs::info("app", "Exited"),
+        Err(error) => logs::error("app", format_args!("Exited with error: {error}")),
+    }
     drop(instance);
     if smoke && STREAM_CHECK_FAILED.load(std::sync::atomic::Ordering::SeqCst) {
         std::process::exit(1);

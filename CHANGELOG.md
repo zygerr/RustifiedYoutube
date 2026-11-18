@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.21
+
+- Add a local debug log at `%LOCALAPPDATA%\io.github.zygerr.rustifiedyoutube\logs\RustifiedYoutube.log` recording playback requests, state changes, recoveries, shown errors, account status, catalog failures, Discord connection changes and crashes. When a track fails to start or the playback page fails to load, the log also records a snapshot of the YouTube page's player status. The previous log is kept as `RustifiedYoutube.old.log`. Credential values are never written.
+- Add **Open logs** to error messages and **Settings → Diagnostics → Open log folder**.
+
 ## 0.3.20
 
 - Fix the main window sometimes opening as a tiny box (for example after a Windows restart) until it was maximized or minimized. Geometry saved while the window was minimized or hidden in the tray is no longer persisted, and a window restored below the minimum size is enlarged on launch.

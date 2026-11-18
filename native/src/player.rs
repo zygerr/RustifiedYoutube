@@ -124,6 +124,54 @@ enum TracePhase {
     SeekWaiting,
 }
 
+fn describe(state: &PlayerState) -> String {
+    format!(
+        "playing={} buffering={} ended={} ad={} transition={} position={:.1}/{:.1} title={:?} error={:?}",
+        state.playing,
+        state.buffering,
+        state.ended,
+        state.ad,
+        state.transition,
+        state.position,
+        state.duration,
+        state.title,
+        state.error
+    )
+}
+
+/// Logs playback state changes that matter for debugging, not every clock tick.
+fn log_transition(previous: &PlayerState, next: &PlayerState, video_id: &str) {
+    if let Some(message) = transition_message(previous, next, video_id) {
+        if next.error.is_some() {
+            crate::logs::warn("player", message);
+        } else {
+            crate::logs::info("player", message);
+        }
+    }
+}
+fn transition_message(
+    previous: &PlayerState,
+    next: &PlayerState,
+    video_id: &str,
+) -> Option<String> {
+    let changed = previous.generation != next.generation
+        || previous.playing != next.playing
+        || previous.buffering != next.buffering
+        || previous.ended != next.ended
+        || previous.ad != next.ad
+        || previous.transition != next.transition
+        || previous.title != next.title
+        || previous.error != next.error;
+    changed.then(|| {
+        format!(
+            "State: gen={} page_video={} {}",
+            next.generation,
+            if video_id.is_empty() { "-" } else { video_id },
+            describe(next)
+        )
+    })
+}
+
 fn playback_origin(uri: &str) -> bool {
     crate::navigation::destination(uri) == Some(crate::navigation::Destination::Music)
 }
@@ -267,6 +315,17 @@ impl Player {
                         nav_repaint.request_repaint();
                         true
                     } else {
+                        // Host only: query strings can carry account tokens.
+                        crate::logs::warn(
+                            "player",
+                            format_args!(
+                                "Blocked navigation to {}",
+                                reqwest::Url::parse(&url)
+                                    .ok()
+                                    .and_then(|url| url.host_str().map(str::to_owned))
+                                    .unwrap_or_else(|| "an unparseable address".into())
+                            ),
+                        );
                         false
                     }
                 })
@@ -296,7 +355,11 @@ impl Player {
                     println!("Playback startup completed");
                 }
             }
-            Err(_) => {
+            Err(error) => {
+                crate::logs::error(
+                    "player",
+                    format_args!("Playback WebView could not be created: {error}"),
+                );
                 let _ = result.updates.send(PlayerState { error:Some("The YouTube playback engine could not start. Install Microsoft WebView2 Runtime and restart RustifiedYoutube.".into()),..Default::default() });
             }
         }
@@ -407,6 +470,14 @@ impl Player {
                     {
                         continue;
                     }
+                    crate::logs::warn(
+                        "player",
+                        format_args!(
+                            "Page reported stalled playback: status={status} video={video_id} gen={generation} already_recovered={} allowed={}",
+                            self.recovered.get(),
+                            self.allowed()
+                        ),
+                    );
                     if status == "LOGIN_REQUIRED" {
                         // A track's playability response isn't the account's
                         // identity (age/region restrictions also use this code).
@@ -441,6 +512,17 @@ impl Player {
                     }
                     let previous = self.identity.get();
                     let identity = crate::playback_session::observed(previous, identity);
+                    if previous != identity {
+                        crate::logs::info(
+                            "account",
+                            format_args!(
+                                "Playback page identity: signed_in={:?} account_index={:?} (expected account: {})",
+                                identity.signed_in,
+                                identity.auth_user,
+                                self.expected_account.get()
+                            ),
+                        );
+                    }
                     self.identity.set(identity);
                     if self.google_sign_out_pending.get().is_some() && identity.signed_in.is_some()
                     {
@@ -531,6 +613,13 @@ impl Player {
                         continue;
                     }
                     *self.document.borrow_mut() = Some(document_id);
+                    crate::logs::info(
+                        "player",
+                        format_args!(
+                            "Playback page ready (resuming: {})",
+                            self.resume.borrow().is_some()
+                        ),
+                    );
                     self.identity.set(Default::default());
                     if self.resume.borrow().is_some() {
                         self.restoring.set(true);
@@ -638,6 +727,7 @@ impl Player {
                         video_available,
                         error,
                     };
+                    log_transition(&self.last_state.borrow(), &state, &video_id);
                     *self.last_state.borrow_mut() = state.clone();
                     let _ = self.updates.send(state);
                 }
@@ -649,6 +739,26 @@ impl Player {
             .is_some_and(|started| started.elapsed() > Duration::from_secs(40))
         {
             self.requested.set(None);
+            let last = self.last_state.borrow().clone();
+            crate::logs::error(
+                "player",
+                format_args!(
+                    "Track did not start within 40 s: requested={} gen={} page_ready={} identity={:?} allowed={} login_open={} recovered={} last_state=[{}]",
+                    self.resume
+                        .borrow()
+                        .as_ref()
+                        .and_then(|resume| resume["id"].as_str().map(str::to_owned))
+                        .unwrap_or_default(),
+                    self.generation.get(),
+                    self.ready.get(),
+                    self.identity.get(),
+                    self.allowed(),
+                    self.login_open.get(),
+                    self.recovered.get(),
+                    describe(&last)
+                ),
+            );
+            self.log_page_diagnostic("track start timeout");
             self.notify_error(
                 "YouTube did not start this track. Try Retry playback or another result.",
             );
@@ -664,6 +774,16 @@ impl Player {
             && (!self.login_open.get() || self.on_music_page())
         {
             self.loading_since.set(None);
+            crate::logs::warn(
+                "player",
+                format_args!(
+                    "Playback page did not finish loading within 25 s (ready={} login_open={} reload_already_attempted={})",
+                    self.ready.get(),
+                    self.login_open.get(),
+                    self.page_reload_attempted.get()
+                ),
+            );
+            self.log_page_diagnostic("page load timeout");
             if self.login_open.replace(false) {
                 self.login_failed.set(true);
             }
@@ -788,7 +908,51 @@ impl Player {
             self.requested.set(Some(Instant::now()));
         }
     }
+    /// Records what the YouTube page itself reports, without page content,
+    /// cookies or tokens: only origin, path, readiness and player status.
+    fn log_page_diagnostic(&self, reason: &'static str) {
+        let Some(webview) = &self.webview else {
+            crate::logs::warn(
+                "player",
+                format_args!("No playback page to inspect ({reason})"),
+            );
+            return;
+        };
+        let script = r#"(() => { try {
+            const api = document.querySelector('ytmusic-player')?.playerApi || document.getElementById('movie_player');
+            const media = api?.getVideoElement?.() || document.querySelector('video');
+            const response = api?.getPlayerResponse?.();
+            return JSON.stringify({
+              origin: location.origin, path: location.pathname,
+              ready: document.readyState, bridge: !!window.__rustifiedMedia,
+              playerBar: !!document.querySelector('ytmusic-player-bar'), playerApi: !!api,
+              signedIn: window.ytcfg?.get?.('LOGGED_IN') ?? null,
+              playerState: api?.getPlayerState?.() ?? null,
+              pageVideo: api?.getVideoData?.()?.video_id ?? null,
+              playability: response?.playabilityStatus?.status ?? null,
+              reason: String(response?.playabilityStatus?.reason ?? '').slice(0, 200),
+              media: media ? {readyState: media.readyState, networkState: media.networkState, paused: media.paused,
+                ended: media.ended, time: Math.round(media.currentTime * 10) / 10, error: media.error?.code ?? null} : null,
+              ad: !!document.getElementById('movie_player')?.classList?.contains('ad-showing')
+            });
+          } catch (error) { return JSON.stringify({diagnosticError: String(error)}); } })()"#;
+        if webview
+            .evaluate_script_with_callback(script, move |result| {
+                crate::logs::info(
+                    "player",
+                    format_args!("Page diagnostic ({reason}): {result}"),
+                );
+            })
+            .is_err()
+        {
+            crate::logs::warn(
+                "player",
+                format_args!("Page diagnostic could not run ({reason})"),
+            );
+        }
+    }
     fn notify_error(&self, message: &str) {
+        crate::logs::warn("player", format_args!("Shown error: {message}"));
         self.requested.set(None);
         let mut state = self.last_state.borrow().clone();
         state.generation = self.generation.get();
@@ -882,6 +1046,13 @@ impl Player {
                 })
                 .unwrap_or_else(|| rustified_core::session::music_url(index))
         };
+        crate::logs::info(
+            "player",
+            format_args!(
+                "Reloading playback page ({})",
+                url.split_once('?').map_or(url.as_str(), |(path, _)| path)
+            ),
+        );
         if let Some(webview) = &self.webview {
             let _ = webview.load_url(&url);
         }
@@ -893,8 +1064,18 @@ impl Player {
                 video_id,
             } => {
                 if !rustified_core::model::valid_video_id(&video_id) {
+                    crate::logs::warn("player", "Ignored play request with an invalid video id");
                     return;
                 }
+                crate::logs::info(
+                    "player",
+                    format_args!(
+                        "Play requested: video={video_id} gen={generation} page_ready={} allowed={} direct={}",
+                        self.ready.get(),
+                        self.allowed(),
+                        self.prefer_direct.get() && !self.login_open.get()
+                    ),
+                );
                 self.generation.set(generation);
                 self.recovered.set(false);
                 self.requested.set(Some(Instant::now()));
@@ -979,6 +1160,52 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_meaningful_state_changes_are_logged() {
+        let playing = super::PlayerState {
+            generation: 3,
+            playing: true,
+            position: 10.,
+            duration: 200.,
+            ..Default::default()
+        };
+        // Clock progress alone is not logged.
+        assert!(
+            super::transition_message(
+                &playing,
+                &super::PlayerState {
+                    position: 11.,
+                    ..playing.clone()
+                },
+                "Fixture0001"
+            )
+            .is_none()
+        );
+        let stalled = super::transition_message(
+            &playing,
+            &super::PlayerState {
+                playing: false,
+                buffering: true,
+                ..playing.clone()
+            },
+            "Fixture0001",
+        )
+        .unwrap();
+        assert!(stalled.contains("gen=3 page_video=Fixture0001"));
+        assert!(stalled.contains("buffering=true"));
+        assert!(
+            super::transition_message(
+                &playing,
+                &super::PlayerState {
+                    error: Some("fixture".into()),
+                    ..playing.clone()
+                },
+                ""
+            )
+            .unwrap()
+            .contains("page_video=-")
+        );
+    }
     #[test]
     fn bridge_accepts_only_the_exact_music_origin() {
         assert!(super::playback_origin(

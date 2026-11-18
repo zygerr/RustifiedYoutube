@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 /// The loaded playback document is authoritative, independently of API cookies.
-#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct Identity {
     pub signed_in: Option<bool>,
     pub auth_user: Option<u8>,

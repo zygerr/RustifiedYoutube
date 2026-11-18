@@ -79,6 +79,9 @@ impl Discord {
             });
         }
         while let Ok(status) = self.statuses.try_recv() {
+            if status != self.status {
+                crate::logs::info("discord", &status);
+            }
             self.status = status;
         }
     }

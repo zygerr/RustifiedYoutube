@@ -55,6 +55,10 @@ The same scroll step also works over the current-song thumbnail in the footer an
 
 The saved volume is applied before playback starts and limits new audio/video sources immediately. Lower levels used by YouTube's loudness normalization are preserved.
 
+## Debug log
+
+The app keeps a local debug log at `%LOCALAPPDATA%\io.github.zygerr.rustifiedyoutube\logs\RustifiedYoutube.log` (the previous one is kept as `RustifiedYoutube.old.log`). It records playback requests and state changes, recovery attempts, shown errors, account and Discord status, and crashes. When a track fails to start, it also records the YouTube page's player status. Google cookies, tokens and passwords are never written. Open it from **Open logs** on an error message or **Settings → Diagnostics → Open log folder**, and attach it when reporting a problem.
+
 ## Discord Rich Presence
 
 Keep Discord desktop running and play a song. Rich Presence shows **Listening to** the song, artist, cover (with the album name on hover when known), progress, and a **Listen on YouTube Music** button. **Settings → Discord Rich Presence** enables or disables sharing and shows the connection status. Pausing keeps the song listed but removes the progress bar immediately. Presence is cleared on buffering, advertisements, playback errors, the end of the queue, or exit. Presence runs on its own background thread, so Discord being closed, restarting, or misbehaving never blocks playback or the interface; the client keeps retrying and connects automatically when Discord starts.

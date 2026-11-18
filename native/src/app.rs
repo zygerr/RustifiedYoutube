@@ -553,7 +553,12 @@ impl MusicApp {
                     }
                 }
                 Response::CaptureSession(id) => self.player.capture_session(id),
-                Response::AccountStatus(status) => self.account_status = status,
+                Response::AccountStatus(status) => {
+                    if status != self.account_status {
+                        crate::logs::info("account", format_args!("Status: {status}"));
+                    }
+                    self.account_status = status;
+                }
                 Response::OpenSignIn => {
                     if crate::account::smoke_active()
                         && !std::env::args().any(|arg| arg == "--smoke-login")
@@ -597,7 +602,13 @@ impl MusicApp {
                     self.loading = false;
                     match result {
                         Ok(tracks) => self.tracks = tracks,
-                        Err(message) => self.error = Some(message),
+                        Err(message) => {
+                            crate::logs::warn(
+                                "catalog",
+                                format_args!("Track list failed: {message}"),
+                            );
+                            self.error = Some(message);
+                        }
                     }
                 }
                 Response::History(result) if self.connected => {
@@ -608,6 +619,7 @@ impl MusicApp {
                             self.history_error = None;
                         }
                         Err(message) => {
+                            crate::logs::warn("catalog", format_args!("History failed: {message}"));
                             self.history_error = Some(message);
                             self.account_retry_at.get_or_insert_with(|| {
                                 std::time::Instant::now() + Duration::from_secs(15)
@@ -622,7 +634,13 @@ impl MusicApp {
                             self.discover_tracks = tracks;
                             self.discover_error = None;
                         }
-                        Err(message) => self.discover_error = Some(message),
+                        Err(message) => {
+                            crate::logs::warn(
+                                "catalog",
+                                format_args!("Discover failed: {message}"),
+                            );
+                            self.discover_error = Some(message);
+                        }
                     }
                 }
                 Response::Library(result) if self.connected => {
@@ -634,6 +652,7 @@ impl MusicApp {
                             self.library_error = None;
                         }
                         Err(message) => {
+                            crate::logs::warn("catalog", format_args!("Library failed: {message}"));
                             self.library_error = Some(message);
                             self.account_retry_at.get_or_insert_with(|| {
                                 std::time::Instant::now() + Duration::from_secs(15)
@@ -663,6 +682,7 @@ impl MusicApp {
                             track.liked = liked;
                         }
                     } else {
+                        crate::logs::warn("catalog", format_args!("Like update failed for {id}"));
                         self.error = Some(
                             "Couldn't update liked songs. Try again after the connection recovers."
                                 .into(),
@@ -697,6 +717,7 @@ impl MusicApp {
                     self.texture_order.push_back(url);
                 }
                 Response::Notice(message) => {
+                    crate::logs::warn("app", format_args!("Notice: {message}"));
                     self.connecting = false;
                     self.loading = false;
                     self.discover_loading = false;
@@ -2384,7 +2405,7 @@ impl MusicApp {
         {
             self.preferences.discord_rpc = Some(enabled);
         }
-        ui.label(RichText::new("Shares the song, artist, artwork and progress while playing. Hides on pause or during ads.").small().color(colors.muted));
+        ui.label(RichText::new("Shares the song, artist, artwork and progress while playing. Pausing keeps the song without progress; ads hide it.").small().color(colors.muted));
         ui.label(RichText::new(&self.discord.status).color(if enabled {
             colors.accent
         } else {
@@ -2413,6 +2434,18 @@ impl MusicApp {
                 "https://discord.com/developers/applications",
             );
         });
+        ui.add_space(28.);
+        ui.heading("Diagnostics");
+        ui.label(
+            RichText::new(
+                "A debug log of playback, sign-in and connection events is kept on this PC. It never contains your Google cookies or password. Attach it when reporting a problem.",
+            )
+            .small()
+            .color(colors.muted),
+        );
+        if ui.button("Open log folder").clicked() {
+            crate::logs::open_folder();
+        }
         ui.add_space(28.);
         ui.heading("RustifiedYoutube");
         ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
@@ -2532,12 +2565,20 @@ impl eframe::App for MusicApp {
                                 ui.label(message);
                                 if self.now.is_some() && ui.small_button("Retry playback").clicked()
                                 {
+                                    crate::logs::info("player", "User chose Retry playback");
                                     self.error = None;
                                     self.player.reconnect();
                                 }
                                 if ui.small_button("Google sign-in").clicked() {
                                     self.connecting = true;
                                     self.backend.send(Request::Connect { force_login: true });
+                                }
+                                if ui
+                                    .small_button("Open logs")
+                                    .on_hover_text("Open the folder with the debug log")
+                                    .clicked()
+                                {
+                                    crate::logs::open_folder();
                                 }
                                 if ui.small_button("Dismiss").clicked() {
                                     self.error = None;
