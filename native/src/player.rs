@@ -124,6 +124,17 @@ enum TracePhase {
     SeekWaiting,
 }
 
+/// Whether a state update is still part of a restored track settling.
+fn still_restoring(
+    error: bool,
+    ended: bool,
+    transition: bool,
+    buffering: bool,
+    duration: f64,
+) -> bool {
+    !error && !ended && (transition || buffering || duration <= 0.)
+}
+
 fn describe(state: &PlayerState) -> String {
     format!(
         "playing={} buffering={} ended={} ad={} transition={} position={:.1}/{:.1} title={:?} error={:?}",
@@ -686,9 +697,12 @@ impl Player {
                     if !video_id.is_empty() && !rustified_core::model::valid_video_id(&video_id) {
                         continue;
                     }
+                    // While a restored track settles, ignore its loading states,
+                    // but never an end of track: the page reports no duration
+                    // once YouTube has moved on, and dropping that update left
+                    // the queue stuck on the finished track.
                     if self.waiting_restore.get()
-                        && error.is_none()
-                        && (transition || buffering || duration <= 0.)
+                        && still_restoring(error.is_some(), ended, transition, buffering, duration)
                     {
                         continue;
                     }
@@ -1160,6 +1174,18 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_track_end_is_not_swallowed_while_a_restore_settles() {
+        // Loading states of the restored track are ignored…
+        assert!(super::still_restoring(false, false, true, false, 189.));
+        assert!(super::still_restoring(false, false, false, true, 189.));
+        assert!(super::still_restoring(false, false, false, false, 0.));
+        // …but an end of track (reported without a duration once YouTube has
+        // moved on) and errors always reach the app.
+        assert!(!super::still_restoring(false, true, false, false, 0.));
+        assert!(!super::still_restoring(true, false, false, true, 0.));
+        assert!(!super::still_restoring(false, false, false, false, 189.));
+    }
     #[test]
     fn only_meaningful_state_changes_are_logged() {
         let playing = super::PlayerState {

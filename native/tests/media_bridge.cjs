@@ -28,10 +28,11 @@ function player(initialVolume = .5, identity = {}, autoplay = true, readyState =
     play() {playedVolumes.push(this.volume);emit('play',this);this.paused=false;return Promise.resolve();}
   }
   let media = new MockMedia(), apiVolume = 100;
+  let apiDuration = 200;
   let acceptSeek = true,unstarted=false,acceptNavigation=true,navigations=0,playability='OK',advertisement=false;
   const api = {
     getVideoElement: () => media, getVideoData: () => ({video_id: id,title}),
-    getCurrentTime: () => clock, getDuration: () => 200,
+    getCurrentTime: () => clock, getDuration: () => apiDuration,
     getPlayerResponse:()=>({playabilityStatus:{status:playability}}),
     getPlayerState: () => unstarted ? -1 : media.paused ? 2 : 1,
     getVolume: () => apiVolume, setVolume(value) {apiVolume=value;media.volume=value/100;},
@@ -92,6 +93,7 @@ function player(initialVolume = .5, identity = {}, autoplay = true, readyState =
     enableAudioSwitch(nextTitle) {songButton={disabled:false,getAttribute:()=>null,hasAttribute:()=>false,click(){id='Fixture0002';title=nextTitle;clock=media.currentTime=0;}};},
     get id(){return id;},
     rejectSeek() {acceptSeek = false;},
+    reportDuration(value) {apiDuration = value;},
     clock(value) {clock = media.currentTime = value;},
     handoff() {id = 'Fixture0002'; clock = media.currentTime = 0; media.seeking = false; media.readyState = 4;}
   };
@@ -334,4 +336,33 @@ test('keyboard media keys go through the app instead of fighting the resume loop
   p.mediaKey('nexttrack');
   p.mediaKey('previoustrack');
   assert.deepEqual(shortcuts(), ['toggle', 'toggle', 'next', 'previous']);
+});
+
+test('YouTube reporting its next item length at the end still ends the track (log 2026-11-18)', () => {
+  const p = player();
+  p.clock(198.8);
+  assert.equal(p.tick().ended, false);
+  // Same video id, but the API already reports the autoplay item's length.
+  p.reportDuration(216.4);
+  p.clock(199.0);
+  assert.equal(p.tick().ended, false);
+  // YouTube then switches to its own next item.
+  p.handoff();
+  const state = p.tick(600);
+  assert.equal(state.ended, true);
+  assert.equal(state.playing, false);
+  assert.equal(p.media.paused, true);
+  assert.equal(p.messages.filter(message => message.type === 'stalled').length, 0);
+});
+
+test('a corrected track length early in playback is still adopted', () => {
+  const p = player();
+  p.reportDuration(230);
+  p.tick();
+  // 199 s is near the stale 200 s length but far from the real 230 s end, so a
+  // switch to another video here is not mistaken for the end of the track.
+  p.clock(199);
+  p.tick();
+  p.handoff();
+  assert.equal(p.tick(600).ended, false);
 });

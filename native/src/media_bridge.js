@@ -340,8 +340,16 @@
     // advances the native queue, without treating an in-progress seek as EOF.
     const observedSeek = session.seekRequest && Math.abs(position()-session.seekRequest.target) < 1.5;
     if (!ad && matches && media && ((!media.seeking && media.readyState >= 2) || observedSeek) && Number.isFinite(duration()) && duration() > 0) {
+      // At the very end of a track YouTube's API can report the length of its
+      // own next autoplay item while still naming the current video. Adopting
+      // it would hide the end of the track, and the handoff would be mistaken
+      // for a stalled page. Keep the track's duration once it has played to
+      // the end of it; earlier corrections (stale lengths at start) still apply.
+      const current=duration();
+      const leaked=session.lastDuration > 0 && Math.abs(current-session.lastDuration) >= 2 &&
+        session.lastPosition >= session.lastDuration - 3;
+      if (!leaked) session.lastDuration=current;
       session.lastPosition=position();
-      session.lastDuration=duration();
     }
   }, 200);
 })();

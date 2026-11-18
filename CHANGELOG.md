@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.22
+
+- Fix playback getting stuck at the end of a song with "YouTube did not start this track". At the end of a track YouTube can report the length of its own next autoplay item before switching videos; the end was missed, the switch was treated as a stalled page, and the finished song was reloaded at its last second. The track's own length is now kept, so the queue advances normally.
+- Never discard an end-of-track update while a restored track is settling.
+
 ## 0.3.21
 
 - Add a local debug log at `%LOCALAPPDATA%\io.github.zygerr.rustifiedyoutube\logs\RustifiedYoutube.log` recording playback requests, state changes, recoveries, shown errors, account status, catalog failures, Discord connection changes and crashes. When a track fails to start or the playback page fails to load, the log also records a snapshot of the YouTube page's player status. The previous log is kept as `RustifiedYoutube.old.log`. Credential values are never written.
