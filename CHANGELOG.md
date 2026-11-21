@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.23
+
+- Add a font choice under **Settings → Appearance**: Default, Segoe UI, Segoe UI Variable, Calibri, Verdana, Georgia, Trebuchet MS and Bahnschrift. Each option previews in its own font, applies instantly and is saved between launches. Fonts are read from the local Windows installation; one that is missing is shown as unavailable and the default is used. Emoji, symbols and styled Unicode titles keep their fallback fonts.
+
 ## 0.3.22
 
 - Fix playback getting stuck at the end of a song with "YouTube did not start this track". At the end of a track YouTube can report the length of its own next autoplay item before switching videos; the end was missed, the switch was treated as a stalled page, and the finished song was reloaded at its last second. The track's own length is now kept, so the queue advances normally.

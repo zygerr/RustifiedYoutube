@@ -25,6 +25,16 @@ pub fn theme() -> Option<crate::theme::Theme> {
         },
     )
 }
+/// `--font <Name>` (for example `SegoeUi`) renders the snapshot in that font.
+pub fn font() -> Option<crate::fonts::UiFont> {
+    if !active() {
+        return None;
+    }
+    let name = std::env::args().skip_while(|arg| arg != "--font").nth(1)?;
+    crate::fonts::UiFont::ALL
+        .into_iter()
+        .find(|font| format!("{font:?}").eq_ignore_ascii_case(&name))
+}
 pub fn compact() -> bool {
     active() && std::env::args().any(|arg| arg == "--compact")
 }
@@ -87,13 +97,14 @@ impl Snapshot {
         if let Some(image) = image {
             let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/ui-preview");
             let name = format!(
-                "{}-{}-{}.png",
+                "{}-{}{}-{}.png",
                 self.page,
                 match theme().unwrap_or_default() {
                     crate::theme::Theme::Classic => "classic",
                     crate::theme::Theme::PurpleHaze => "purple",
                     crate::theme::Theme::Oled => "oled",
                 },
+                font().map(|font| format!("-{font:?}")).unwrap_or_default(),
                 if compact() { "1080" } else { "1440" }
             );
             let output = directory.join(name);

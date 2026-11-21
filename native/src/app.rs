@@ -30,6 +30,7 @@ enum Page {
 #[serde(default)]
 struct Preferences {
     theme: Theme,
+    font: crate::fonts::UiFont,
     volume: Option<f32>,
     recent: Vec<Track>,
     close_to_tray: Option<bool>,
@@ -111,6 +112,7 @@ pub struct MusicApp {
     tray: Option<tray_icon::TrayIcon>,
     tray_rx: mpsc::Receiver<TrayAction>,
     quit: bool,
+    fonts_available: Vec<crate::fonts::UiFont>,
     window_guard: crate::window::Guard,
     about: bool,
     timeline: crate::timeline::Timeline,
@@ -128,7 +130,6 @@ impl MusicApp {
         taskbar_events: Option<crate::taskbar::Events>,
     ) -> Self {
         let ctx = &cc.egui_ctx;
-        crate::fonts::install(ctx);
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = Vec2::new(10., 10.);
         style.spacing.button_padding = Vec2::new(14., 9.);
@@ -143,6 +144,14 @@ impl MusicApp {
             .storage
             .and_then(|s| eframe::get_value(s, "preferences"))
             .unwrap_or_default();
+        let fonts_available = crate::fonts::install(
+            ctx,
+            if crate::preview::active() {
+                crate::preview::font().unwrap_or_default()
+            } else {
+                preferences.font
+            },
+        );
         crate::preview::theme()
             .unwrap_or(preferences.theme)
             .apply(ctx);
@@ -203,6 +212,7 @@ impl MusicApp {
             tray,
             tray_rx,
             quit: false,
+            fonts_available,
             window_guard: crate::window::Guard::new(cc.storage),
             about: false,
             timeline: crate::timeline::Timeline::default(),
@@ -241,6 +251,7 @@ impl MusicApp {
             return;
         };
         self.preferences.theme = crate::preview::theme().unwrap_or_default();
+        self.preferences.font = crate::preview::font().unwrap_or_default();
         self.page = match snapshot.page.as_str() {
             "library" => Page::Library,
             "search" => Page::Tracks("Search results".into()),
@@ -2286,7 +2297,7 @@ impl MusicApp {
         ui.add_space(6.);
         ui.label(
             RichText::new(
-                "Choose your theme. Changes apply instantly and are saved automatically.",
+                "Choose your theme and font. Changes apply instantly and are saved automatically.",
             )
             .small()
             .color(colors.muted),
@@ -2295,6 +2306,20 @@ impl MusicApp {
         if let Some(selected) = theme::selector(ui, self.preferences.theme) {
             self.preferences.theme = selected;
             selected.apply(ui.ctx());
+        }
+        ui.add_space(18.);
+        ui.label(RichText::new("Font").strong());
+        ui.label(
+            RichText::new("Uses fonts installed with Windows. Emoji and styled titles keep their fallback fonts.")
+                .small()
+                .color(colors.muted),
+        );
+        ui.add_space(8.);
+        if let Some(font) = crate::fonts::selector(ui, self.preferences.font, &self.fonts_available)
+        {
+            self.preferences.font = font;
+            crate::logs::info("app", format_args!("Font changed to {}", font.name()));
+            self.fonts_available = crate::fonts::install(ui.ctx(), font);
         }
         ui.add_space(28.);
         ui.heading("Account");

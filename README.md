@@ -15,7 +15,7 @@ An unofficial Windows x64 YouTube Music client. The interface, search, library, 
 - View and play upcoming queue entries in the right-hand panel. Back returns to search or the library without stopping playback.
 - Render styled Unicode song titles, symbols, and emoji with fallback fonts installed by Windows. Windows font files are read locally and are not redistributed.
 - Search both songs and videos, filter All/Songs/Videos, and prioritize matching artists while keeping full titles.
-- Choose **Settings → Appearance** for **Classic**, **Purple Haze** (dark plum and lavender), or **OLED** (pure black main surfaces and player). Theme changes apply immediately and are saved between launches.
+- Choose **Settings → Appearance** for **Classic**, **Purple Haze** (dark plum and lavender), or **OLED** (pure black main surfaces and player). Theme changes apply immediately and are saved between launches. The same page offers a **Font** choice (Default, Segoe UI, Segoe UI Variable, Calibri, Verdana, Georgia, Trebuchet MS or Bahnschrift) using fonts installed with Windows; emoji and styled titles keep their fallback fonts.
 - Connect a Google account to access playlists, liked songs, and like/unlike actions.
 - Find account listening history and locally remembered plays in **Discover → Listen again**. Click a card to play; Refresh reloads account history.
 - Seek on the full-width bottom rail or the rail below the expanded media panel. Click or drag to seek; focus the rail and use Left/Right to move five seconds.
