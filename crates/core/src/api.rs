@@ -683,10 +683,7 @@ mod bootstrap_tests {
             artist: "Another channel".into(),
             ..official.clone()
         };
-        assert!(
-            super::relevance(&official, "nova lane")
-                > super::relevance(&other, "nova lane")
-        );
+        assert!(super::relevance(&official, "nova lane") > super::relevance(&other, "nova lane"));
         assert_eq!(super::normalized("LUPTĂ ȘI ȚARĂ"), "lupta si tara");
     }
     #[test]

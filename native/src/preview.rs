@@ -146,10 +146,12 @@ impl Snapshot {
     }
 }
 pub fn tracks() -> Vec<Track> {
+    // Invented songs and artists. The titles still cover styled Unicode with
+    // emoji, Romanian diacritics, and a title too long for one card.
     let titles = [
-        "𝗡𝗜𝗚𝗛𝗧 𝗦𝗛𝗜𝗙𝗧 🚀 𝗔𝗟𝗟 𝗧𝗛𝗘 𝗖𝗜𝗧𝗬 𝗟𝗜𝗚𝗛𝗧𝗦 ▪ 𝗢𝗙𝗜𝗖𝗜𝗔𝗟 𝗔𝗨𝗗𝗜𝗢",
+        "𝗡𝗜𝗚𝗛𝗧 𝗦𝗛𝗜𝗙𝗧 🚀 𝗔𝗟𝗟 𝗧𝗛𝗘 𝗖𝗜𝗧𝗬 𝗟𝗜𝗚𝗛𝗧𝗦 ▪ 𝗢𝗙𝗙𝗜𝗖𝗜𝗔𝗟 𝗔𝗨𝗗𝗜𝗢",
         "Paper Planes (feat. June Hollow)",
-        "NIGHT SHIFT",
+        "CÂNTEC DE TOAMNĂ ȘI VÂNT",
         "Slow Motion Summer",
         "A very long song title that should always fit the same card height without moving the next row",
         "Glass Harbor",
@@ -161,10 +163,10 @@ pub fn tracks() -> Vec<Track> {
             artist: [
                 "Nova Lane",
                 "Marlow & Finch",
-                "Nova Lane",
+                "Orchestra Aurora",
                 "Lumen Drift",
                 "Various artists",
-                "Marlow & Finch",
+                "Echo Avenue",
             ][index % 6]
                 .into(),
             cover: format!("fixture-{}", index % 6),
@@ -208,19 +210,25 @@ pub fn textures(ctx: &egui::Context) -> Vec<(String, egui::TextureHandle)> {
                 [170, 125, 35],
                 [45, 123, 136],
             ][index];
+            // Abstract cover art: a diagonal gradient with a soft glow and a
+            // ring. Sizes stay wide/square/tall to exercise cover cropping.
             let mut image = egui::ColorImage::filled(size, egui::Color32::BLACK);
+            let (width, height) = (size[0] as f32, size[1] as f32);
+            let (cx, cy) = (width * (0.35 + 0.1 * index as f32 % 0.3), height * 0.4);
+            let radius = width.min(height) * 0.32;
             for y in 0..size[1] {
                 for x in 0..size[0] {
-                    let stripe = if (x / 24 + y / 24) % 2 == 0 {
-                        1.0
-                    } else {
-                        0.72
-                    };
-                    let light = (0.55 + 0.45 * y as f32 / size[1] as f32) * stripe;
+                    let (fx, fy) = (x as f32, y as f32);
+                    let diagonal = (fx / width + fy / height) / 2.;
+                    let distance = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
+                    let glow = (1. - distance / (radius * 2.2)).max(0.).powi(2) * 0.55;
+                    let ring = (1. - ((distance - radius).abs() / 3.)).max(0.) * 0.35;
+                    let light = 0.35 + 0.65 * (1. - diagonal) + glow + ring;
+                    let channel = |value: u8| (value as f32 * light).min(255.) as u8;
                     image.pixels[y * size[0] + x] = egui::Color32::from_rgb(
-                        (base[0] as f32 * light) as u8,
-                        (base[1] as f32 * light) as u8,
-                        (base[2] as f32 * light) as u8,
+                        channel(base[0]),
+                        channel(base[1]),
+                        channel(base[2]),
                     );
                 }
             }

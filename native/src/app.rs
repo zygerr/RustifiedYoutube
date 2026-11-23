@@ -40,6 +40,18 @@ struct Preferences {
     discord_application_id: Option<String>,
 }
 
+/// Live streaming check input. The first video must be a music video that
+/// YouTube Music also offers as a song (for the Audio/Video switch), and
+/// `--smoke-title` a word from its song title. Defaults are well-known public
+/// videos; override them with `--smoke-video`, `--smoke-video-2` and
+/// `--smoke-title`.
+fn stream_check_arg(name: &str, default: &str) -> String {
+    std::env::args()
+        .skip_while(|arg| arg != name)
+        .nth(1)
+        .unwrap_or_else(|| default.into())
+}
+
 struct StreamCheck {
     started: std::time::Instant,
     selected: Option<std::time::Instant>,
@@ -1734,13 +1746,13 @@ impl MusicApp {
                 self.player.send(PlayerCommand::Volume(0.));
                 self.queue = vec![
                     Track {
-                        id: "Fixture0001".into(),
+                        id: stream_check_arg("--smoke-video", "dQw4w9WgXcQ"),
                         title: "Streaming check one".into(),
                         is_video: true,
                         ..Default::default()
                     },
                     Track {
-                        id: "Fixture0002".into(),
+                        id: stream_check_arg("--smoke-video-2", "9bZkp7q19f0"),
                         title: "Streaming check two".into(),
                         is_video: true,
                         ..Default::default()
@@ -1873,7 +1885,9 @@ impl MusicApp {
                 && !self.state.ad
                 && !self.state.transition =>
             {
-                if !self.state.title.to_lowercase().contains("night") {
+                let expected =
+                    stream_check_arg("--smoke-title", "never gonna give you up").to_lowercase();
+                if !self.state.title.to_lowercase().contains(&expected) {
                     eprintln!("Audio mode selected another track: {}", self.state.title);
                     crate::STREAM_CHECK_FAILED.store(true, std::sync::atomic::Ordering::SeqCst);
                     self.quit = true;
