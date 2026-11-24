@@ -12,6 +12,7 @@
   <a href="https://github.com/zygerr/RustifiedYoutube/releases/latest"><img src="https://img.shields.io/github/v/release/zygerr/RustifiedYoutube?label=download" alt="Latest release"></a>
   <a href="https://github.com/zygerr/RustifiedYoutube/actions/workflows/windows.yml"><img src="https://github.com/zygerr/RustifiedYoutube/actions/workflows/windows.yml/badge.svg" alt="Build status"></a>
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4" alt="Windows 10 and 11">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/zygerr/RustifiedYoutube" alt="MIT license"></a>
 </p>
 
 ![RustifiedYoutube Discover page](docs/screenshots/discover.png)
@@ -69,6 +70,10 @@ cargo run -p rustified-youtube-native --locked   # run the app
 ```
 
 You'll need Rust (MSVC toolchain) and the Microsoft C++ Build Tools. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for tests, live checks, screenshots and releases, and [CHANGELOG.md](CHANGELOG.md) for what's new.
+
+## License
+
+[MIT](LICENSE) © zygerr. Third-party components keep their own licenses — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ---
 
