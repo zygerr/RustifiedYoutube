@@ -190,6 +190,15 @@ pub fn playlists() -> Vec<Playlist> {
             ][index % 6]
                 .into(),
             subtitle: "Playlist · 24 songs".into(),
+            creator: [
+                "",
+                "Nova Lane",
+                "Marlow & Finch",
+                "Nova Lane",
+                "Orchestra Aurora",
+                "Lumen Drift",
+            ][index % 6]
+                .into(),
             cover: format!("fixture-{}", index % 6),
         })
         .collect()

@@ -27,6 +27,9 @@ pub struct Playlist {
     pub title: String,
     pub subtitle: String,
     pub cover: String,
+    /// Who made the playlist, when YouTube Music says so.
+    #[serde(default)]
+    pub creator: String,
 }
 
 pub fn format_time(seconds: f64) -> String {

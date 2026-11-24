@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.24
+
+- Show who created each playlist in the sidebar (for example **Playlist • creator**), with the creator also in the hover tooltip. Automatic playlists such as Liked Music show **Auto playlist**.
+- License the project under MIT.
+
 ## 0.3.23
 
 - Add a font choice under **Settings → Appearance**: Default, Segoe UI, Segoe UI Variable, Calibri, Verdana, Georgia, Trebuchet MS and Bahnschrift. Each option previews in its own font, applies instantly and is saved between launches. Fonts are read from the local Windows installation; one that is missing is shown as unavailable and the default is used. Emoji, symbols and styled Unicode titles keep their fallback fonts.

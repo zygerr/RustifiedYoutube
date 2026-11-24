@@ -498,6 +498,58 @@ impl ytmapi_rs::parse::ParseFrom<LibraryQuery> for LibraryPage {
     }
 }
 
+/// Finds a playlist's creator in its subtitle, for example
+/// `Playlist • Some Creator • 24 songs`. Runs that link to a channel or artist
+/// are the creator; otherwise the first part that is neither the item kind nor
+/// a count is used. Automatic playlists have no creator.
+fn playlist_creator(runs: &[serde_json::Value], subtitle: &str) -> String {
+    let linked: Vec<&str> = runs
+        .iter()
+        .filter(|run| {
+            let endpoint = run.pointer("/navigationEndpoint/browseEndpoint");
+            let page_type = endpoint
+                .and_then(|e| {
+                    e.pointer(
+                        "/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType",
+                    )
+                })
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let browse_id = endpoint
+                .and_then(|e| e.get("browseId"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            matches!(
+                page_type,
+                "MUSIC_PAGE_TYPE_USER_CHANNEL" | "MUSIC_PAGE_TYPE_ARTIST"
+            ) || browse_id.starts_with("UC")
+        })
+        .filter_map(|run| run.get("text").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect();
+    if !linked.is_empty() {
+        return linked.join(", ");
+    }
+    subtitle
+        .split(" • ")
+        .map(str::trim)
+        .find(|part| {
+            let lower = part.to_lowercase();
+            !part.is_empty()
+                && !matches!(
+                    lower.as_str(),
+                    "playlist" | "auto playlist" | "album" | "single" | "ep" | "podcast"
+                )
+                && !part.starts_with(|c: char| c.is_ascii_digit())
+                && !["song", "track", "view", "episode"]
+                    .iter()
+                    .any(|unit| lower.contains(unit))
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn collect_library(value: &serde_json::Value, page: &mut LibraryPage) {
     if let Some(card) = value.get("musicTwoRowItemRenderer") {
         let id = card
@@ -507,15 +559,16 @@ fn collect_library(value: &serde_json::Value, page: &mut LibraryPage) {
         if let (Some(id), Some(title)) = (id, title)
             && let Some(id) = id.strip_prefix("VL")
         {
-            let subtitle = card
+            let runs = card
                 .pointer("/subtitle/runs")
                 .and_then(|v| v.as_array())
-                .map(|runs| {
-                    runs.iter()
-                        .filter_map(|run| run.get("text").and_then(|v| v.as_str()))
-                        .collect::<String>()
-                })
+                .map(Vec::as_slice)
                 .unwrap_or_default();
+            let subtitle = runs
+                .iter()
+                .filter_map(|run| run.get("text").and_then(|v| v.as_str()))
+                .collect::<String>();
+            let creator = playlist_creator(runs, &subtitle);
             let images: Vec<Thumbnail> = card
                 .pointer("/thumbnailRenderer/musicThumbnailRenderer/thumbnail/thumbnails")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -525,6 +578,7 @@ fn collect_library(value: &serde_json::Value, page: &mut LibraryPage) {
                 title: title.into(),
                 subtitle,
                 cover: cover(&images),
+                creator,
             });
         }
         return;
@@ -700,6 +754,44 @@ mod bootstrap_tests {
     }
 
     #[test]
+    fn playlist_creator_comes_from_the_linked_channel_or_the_subtitle_text() {
+        let runs = |value: serde_json::Value| value.as_array().unwrap().clone();
+        let channel = |name: &str| {
+            serde_json::json!({"text": name, "navigationEndpoint": {"browseEndpoint": {
+                "browseId": "UCfixture",
+                "browseEndpointContextSupportedConfigs": {"browseEndpointContextMusicConfig": {
+                    "pageType": "MUSIC_PAGE_TYPE_USER_CHANNEL"}}}}})
+        };
+        let linked = runs(serde_json::json!([
+            {"text": "Playlist"}, {"text": " • "}, channel("Nova Lane"), {"text": " • "}, {"text": "24 songs"}
+        ]));
+        assert_eq!(
+            super::playlist_creator(&linked, "Playlist • Nova Lane • 24 songs"),
+            "Nova Lane"
+        );
+        let two = runs(
+            serde_json::json!([channel("Nova Lane"), {"text": " & "}, channel("Echo Avenue")]),
+        );
+        assert_eq!(super::playlist_creator(&two, ""), "Nova Lane, Echo Avenue");
+        // Without links, the first part that isn't a kind or a count.
+        for (subtitle, creator) in [
+            ("Marlow & Finch • 12 songs", "Marlow & Finch"),
+            (
+                "Playlist • Orchestra Aurora • 1.2K views",
+                "Orchestra Aurora",
+            ),
+            ("Auto playlist", ""),
+            ("Playlist • 30 tracks", ""),
+            ("1 song", ""),
+        ] {
+            assert_eq!(
+                super::playlist_creator(&[], subtitle),
+                creator,
+                "{subtitle}"
+            );
+        }
+    }
+    #[test]
     fn library_tolerates_short_subtitles_and_keeps_continuations() {
         let data = serde_json::json!({"items":[
             {"musicTwoRowItemRenderer":{"title":{"runs":[{"text":"Create playlist"}]}}},
@@ -716,6 +808,7 @@ mod bootstrap_tests {
         assert_eq!(page.playlists.len(), 1);
         assert_eq!(page.playlists[0].id, "PLtest");
         assert_eq!(page.playlists[0].subtitle, "1 song");
+        assert_eq!(page.playlists[0].creator, "");
         assert_eq!(page.continuation.as_deref(), Some("next-page"));
     }
 }

@@ -995,9 +995,18 @@ impl MusicApp {
                             if active || response.hovered() {
                                 ui.painter().rect_filled(rect, 6., if active { colors.selected } else { colors.hover });
                             }
+                            let byline = if playlist.creator.is_empty() {
+                                if playlist.subtitle.to_lowercase().starts_with("auto playlist") {
+                                    "Auto playlist".to_string()
+                                } else {
+                                    "Playlist".to_string()
+                                }
+                            } else {
+                                format!("Playlist • {}", playlist.creator)
+                            };
                             for (text, size, y, color) in [
                                 (playlist.title.as_str(), 13., 6., colors.text),
-                                ("Playlist", 11., 25., colors.muted),
+                                (byline.as_str(), 11., 25., colors.muted),
                             ] {
                                 let mut job = egui::text::LayoutJob::simple(text.into(), FontId::proportional(size), color, rect.width() - 20.);
                                 job.wrap.max_rows = 1;
@@ -1005,7 +1014,12 @@ impl MusicApp {
                                 ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).galley(rect.min + Vec2::new(10., y), galley, color);
                             }
                             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &playlist.title));
-                            if response.on_hover_text(&playlist.title).clicked() {
+                            let hover = if playlist.creator.is_empty() {
+                                playlist.title.clone()
+                            } else {
+                                format!("{}\nby {}", playlist.title, playlist.creator)
+                            };
+                            if response.on_hover_text(hover).clicked() {
                                 self.playlist(playlist.id, playlist.title);
                             }
                         }
