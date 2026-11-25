@@ -23,13 +23,13 @@ pub enum StatusDisplay {
     /// The Discord application's name ("RustifiedYoutube").
     AppName,
     /// The artist of the current song.
-    #[default]
     Artist,
     /// The title of the current song.
+    #[default]
     Song,
 }
 impl StatusDisplay {
-    pub const ALL: [Self; 3] = [Self::Artist, Self::Song, Self::AppName];
+    pub const ALL: [Self; 3] = [Self::Song, Self::Artist, Self::AppName];
     pub fn label(self) -> &'static str {
         match self {
             Self::AppName => "App name",
@@ -619,7 +619,7 @@ mod tests {
             assert_eq!(value["state"], "Nova Lane");
             assert_eq!(value["details"], base.as_ref().unwrap()["details"]);
         }
-        assert_eq!(StatusDisplay::default(), StatusDisplay::Artist);
+        assert_eq!(StatusDisplay::default(), StatusDisplay::Song);
         // Switching the choice re-sends the presence; clearing stays a clear.
         assert!(!equivalent(
             &with_status_display(base.clone(), StatusDisplay::Artist),

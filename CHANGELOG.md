@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.26
+
+- Discord Rich Presence now shows the **song** after “Listening to” by default. Artist and App name remain available under **Settings → Discord Rich Presence → Status shows**.
+
 ## 0.3.25
 
 - Discord Rich Presence can show the **artist** or the **song** after “Listening to” instead of the app name. Choose under **Settings → Discord Rich Presence → Status shows**; the default is Artist.

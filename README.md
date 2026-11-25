@@ -38,7 +38,7 @@ Needs Windows 10 or 11 (x64) and the [Microsoft WebView2 Runtime](https://develo
 - **Native interface** — a quick Rust interface with a play queue, shuffle, repeat, and an expanded player that switches between audio and music video.
 - **Make it yours** — three themes (Classic, Purple Haze, OLED) and eight fonts, applied instantly.
 - **Works with Windows** — keyboard media keys, taskbar thumbnail buttons, the tray, and the volume mixer.
-- **Discord Rich Presence** — shows *Listening to* the artist or song you're playing, with a *Listen on YouTube Music* button.
+- **Discord Rich Presence** — shows *Listening to* the song (or artist) you're playing, with a *Listen on YouTube Music* button.
 - **Streams instantly** — playback uses the official YouTube Music player, so nothing is downloaded.
 
 ## Shortcuts
