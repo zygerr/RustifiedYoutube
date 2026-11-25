@@ -38,6 +38,7 @@ struct Preferences {
     shuffle: Option<bool>,
     discord_rpc: Option<bool>,
     discord_application_id: Option<String>,
+    discord_status: crate::discord::StatusDisplay,
 }
 
 /// Live streaming check input. The first video must be a music video that
@@ -2459,6 +2460,17 @@ impl MusicApp {
             self.preferences.discord_rpc = Some(enabled);
         }
         ui.label(RichText::new("Shares the song, artist, artwork and progress while playing. Pausing keeps the song without progress; ads hide it.").small().color(colors.muted));
+        ui.horizontal(|ui| {
+            ui.label("Status shows “Listening to”");
+            for display in crate::discord::StatusDisplay::ALL {
+                if ui
+                    .selectable_label(self.preferences.discord_status == display, display.label())
+                    .clicked()
+                {
+                    self.preferences.discord_status = display;
+                }
+            }
+        });
         ui.label(RichText::new(&self.discord.status).color(if enabled {
             colors.accent
         } else {
@@ -2531,6 +2543,7 @@ impl eframe::App for MusicApp {
                 .unwrap_or(crate::discord::APPLICATION_ID),
             self.now.as_ref(),
             &self.state,
+            self.preferences.discord_status,
         );
         if let Some(taskbar) = &mut self.taskbar {
             let controls = crate::taskbar::Controls {

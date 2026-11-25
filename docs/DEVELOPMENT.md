@@ -43,7 +43,7 @@ A saved library credential does not prove playback is authenticated: with an acc
 - **Volume mixer** — audio sessions are labeled *RustifiedYoutube* with the app icon (a standalone ICO in app data, with an executable-resource fallback). Volume, mute and routing are left untouched.
 - **Taskbar** — thumbnail Previous / Play-Pause / Next buttons stay in sync, work while minimized and disable Next at the end of the queue unless Repeat is on.
 - **Media keys** — the page's Media Session actions are claimed before YouTube's scripts run and routed to the app's queue, so headset buttons and the Windows media flyout behave the same.
-- **Discord Rich Presence** — uses Discord's [local RPC protocol](https://docs.discord.com/developers/topics/rpc) on a background thread with automatic reconnection. The default public Application ID `1568660934296076398` can be replaced under **Settings → Discord Rich Presence → Application settings**. No login, bot token or client secret is needed, and Google session data never enters the payload.
+- **Discord Rich Presence** — uses Discord's [local RPC protocol](https://docs.discord.com/developers/topics/rpc) on a background thread with automatic reconnection. The activity’s `status_display_type` picks what follows “Listening to” (app name, artist or song, set in Settings). The default public Application ID `1568660934296076398` can be replaced under **Settings → Discord Rich Presence → Application settings**. No login, bot token or client secret is needed, and Google session data never enters the payload.
 
 ## Checks
 

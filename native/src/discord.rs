@@ -17,6 +17,44 @@ pub const APPLICATION_ID: &str = "1568660934296076398";
 const MAX_FRAME: usize = 64 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// What Discord shows after "Listening to" in your status and the member list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StatusDisplay {
+    /// The Discord application's name ("RustifiedYoutube").
+    AppName,
+    /// The artist of the current song.
+    #[default]
+    Artist,
+    /// The title of the current song.
+    Song,
+}
+impl StatusDisplay {
+    pub const ALL: [Self; 3] = [Self::Artist, Self::Song, Self::AppName];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AppName => "App name",
+            Self::Artist => "Artist",
+            Self::Song => "Song",
+        }
+    }
+    /// Discord's `status_display_type`: 0 name, 1 state (artist), 2 details (song).
+    fn code(self) -> u8 {
+        match self {
+            Self::AppName => 0,
+            Self::Artist => 1,
+            Self::Song => 2,
+        }
+    }
+}
+
+/// Sets which activity field Discord shows after "Listening to".
+fn with_status_display(activity: Option<Value>, display: StatusDisplay) -> Option<Value> {
+    activity.map(|mut value| {
+        value["status_display_type"] = json!(display.code());
+        value
+    })
+}
+
 #[derive(Clone, Default)]
 struct Update {
     enabled: bool,
@@ -59,8 +97,9 @@ impl Discord {
         application_id: &str,
         track: Option<&Track>,
         state: &PlayerState,
+        display: StatusDisplay,
     ) {
-        let activity = activity(track, state, unix_time());
+        let activity = with_status_display(activity(track, state, unix_time()), display);
         if let Some(updates) = &self.updates {
             updates.send_if_modified(|previous| {
                 if previous.enabled == enabled
@@ -184,9 +223,16 @@ fn equivalent(left: &Option<Value>, right: &Option<Value>) -> bool {
                 }
             });
             clocks_match
-                && ["type", "details", "state", "assets", "buttons"]
-                    .into_iter()
-                    .all(|key| left[key] == right[key])
+                && [
+                    "type",
+                    "details",
+                    "state",
+                    "assets",
+                    "buttons",
+                    "status_display_type",
+                ]
+                .into_iter()
+                .all(|key| left[key] == right[key])
         }
         _ => false,
     }
@@ -552,6 +598,34 @@ mod tests {
                 1001
             )
         ));
+    }
+    #[test]
+    fn the_status_line_can_show_the_artist_the_song_or_the_app_name() {
+        let playing = PlayerState {
+            playing: true,
+            position: 30.,
+            duration: 200.,
+            ..Default::default()
+        };
+        let base = activity(Some(&track()), &playing, 1000);
+        for (display, code) in [
+            (StatusDisplay::AppName, 0),
+            (StatusDisplay::Artist, 1),
+            (StatusDisplay::Song, 2),
+        ] {
+            let value = with_status_display(base.clone(), display).unwrap();
+            assert_eq!(value["status_display_type"], code);
+            // The fields Discord picks from are still the artist and song.
+            assert_eq!(value["state"], "Nova Lane");
+            assert_eq!(value["details"], base.as_ref().unwrap()["details"]);
+        }
+        assert_eq!(StatusDisplay::default(), StatusDisplay::Artist);
+        // Switching the choice re-sends the presence; clearing stays a clear.
+        assert!(!equivalent(
+            &with_status_display(base.clone(), StatusDisplay::Artist),
+            &with_status_display(base, StatusDisplay::Song)
+        ));
+        assert!(with_status_display(None, StatusDisplay::Song).is_none());
     }
     #[test]
     fn text_truncation_preserves_unicode_and_id_validation_rejects_tokens() {

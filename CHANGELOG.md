@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.25
+
+- Discord Rich Presence can show the **artist** or the **song** after “Listening to” instead of the app name. Choose under **Settings → Discord Rich Presence → Status shows**; the default is Artist.
+
 ## 0.3.24
 
 - Show who created each playlist in the sidebar (for example **Playlist • creator**), with the creator also in the hover tooltip. Automatic playlists such as Liked Music show **Auto playlist**.
